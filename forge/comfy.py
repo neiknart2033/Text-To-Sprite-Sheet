@@ -22,6 +22,8 @@ import uuid
 
 from PIL import Image
 
+from .workflows import fill_defaults
+
 log = logging.getLogger(__name__)
 
 POLL_S = 2.0  # chu kỳ hỏi /history (test đặt nhỏ lại)
@@ -36,6 +38,7 @@ class ComfyClient:
         self.url = url.rstrip("/")
         self.timeout = timeout
         self.client_id = uuid.uuid4().hex
+        self._object_info: dict | None = None
 
     # ------------------------------------------------------------------ HTTP
     def _request(self, method: str, path: str, data: bytes | None = None,
@@ -64,8 +67,14 @@ class ComfyClient:
         except (urllib.error.URLError, OSError) as e:
             raise ComfyError(f"Không kết nối được ComfyUI tại {self.url}: {e}") from e
 
+    def object_info(self) -> dict:
+        """Mô tả mọi node đang cài (đọc một lần rồi giữ lại)."""
+        if self._object_info is None:
+            self._object_info = self._get_json("/object_info", timeout=120)
+        return self._object_info
+
     def missing_nodes(self, class_types: list[str]) -> list[str]:
-        info = self._get_json("/object_info", timeout=60)
+        info = self.object_info()
         return [c for c in class_types if c not in info]
 
     def list_models(self, folder: str) -> list[str]:
@@ -112,6 +121,11 @@ class ComfyClient:
 
     # ------------------------------------------------------------ chạy graph
     def queue(self, graph: dict) -> str:
+        try:
+            for change in fill_defaults(graph, self.object_info()):
+                log.debug("graph: %s", change)
+        except (ComfyError, urllib.error.URLError, OSError, ValueError) as e:
+            log.debug("Không đọc được /object_info, gửi graph nguyên trạng: %s", e)
         r = self._post_json("/prompt", {"prompt": graph, "client_id": self.client_id})
         prompt_id = r.get("prompt_id")
         if not prompt_id:

@@ -170,46 +170,63 @@ def main(argv: list[str] | None = None) -> int:
 # v2: tách nền nhân vật loang từ mép (sửa lỗi nền đen ăn thủng nhân vật).
 # v3: nhân vật nền trắng 512x768 + loại ảnh bị cắt mép; WAN 640px, key màu phông thật,
 #     chọn frame lành trong ±2 frame.
-PIPELINE_VERSION = 3
+# v4: engine "pose" (khung xương + SD1.5 + ControlNet OpenPose + IP-Adapter) mặc định.
+PIPELINE_VERSION = 4
 
 
 def _digest(*parts) -> str:
     return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
 
 
-def character_fingerprint(cfg: config.Settings, job: config.Job) -> str:
-    """Mọi thứ quyết định nhân vật. Đổi một trong số này -> tạo lại nhân vật."""
-    return _digest(PIPELINE_VERSION, job.mode, job.prompt, job.character_image, job.seed,
+def character_fingerprint(cfg: config.Settings, job: config.Job, jobs_dir: Path) -> str:
+    """Mọi thứ quyết định nhân vật. Đổi một trong số này -> tạo lại nhân vật.
+
+    Mode "image" tính cả NỘI DUNG file ảnh mẫu: upload bản sửa cùng tên vẫn được nhận ra.
+    """
+    source = None
+    if job.mode == "image":
+        src = _resolve_path(job.character_image, jobs_dir)
+        source = hashlib.sha1(src.read_bytes()).hexdigest() if src else "missing"
+    return _digest(PIPELINE_VERSION, job.mode, job.prompt, job.character_image, source, job.seed,
                    cfg.seed, cfg.checkpoint, cfg.steps, cfg.cfg_scale, cfg.sampler, cfg.scheduler,
-                   cfg.char_height, cfg.palette, cfg.view, cfg.bg_color)
+                   cfg.char_height, cfg.char_height_explicit, cfg.palette, cfg.palette_explicit,
+                   cfg.frame_size, cfg.view, cfg.bg_color, cfg.engine,
+                   {k: cfg.pose[k] for k in ("controlnet", "strength", "size")})
 
 
 def action_fingerprint(cfg: config.Settings, job: config.Job, act: config.Action, native) -> str:
     """Mọi thứ quyết định một action, gồm cả ảnh nhân vật thật (đổi nhân vật -> làm lại)."""
+    engine_cfg = cfg.pose if act.engine == "pose" else cfg.wan
     return _digest(PIPELINE_VERSION, dataclasses.asdict(act), job.prompt, job.seed, cfg.seed,
-                   cfg.frame_size, cfg.fps, cfg.preview_scale, cfg.view, cfg.bg_color, cfg.wan,
+                   cfg.steps, cfg.cfg_scale, cfg.sampler, cfg.scheduler, cfg.checkpoint,
+                   cfg.frame_size, cfg.fps, cfg.preview_scale, cfg.view, cfg.bg_color, engine_cfg,
                    hashlib.sha1(native.tobytes()).hexdigest())
 
 
-def _character_is_current(cfg: config.Settings, job: config.Job, job_dir: Path) -> bool:
+def _character_is_current(cfg: config.Settings, job: config.Job, job_dir: Path,
+                          jobs_dir: Path) -> bool:
     try:
         info = json.loads((job_dir / "character.json").read_text(encoding="utf-8"))
     except (FileNotFoundError, ValueError):
         return False
     return ((job_dir / "character.png").exists()
-            and info.get("fingerprint") == character_fingerprint(cfg, job))
+            and info.get("fingerprint") == character_fingerprint(cfg, job, jobs_dir))
 
 
 def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: config.Action,
                character, job_dir: Path, tag: str) -> dict:
-    """Một action: WAN -> hậu xử lý -> 3 file. Không bao giờ ném lỗi ra ngoài."""
+    """Một action: tạo frame (pose/video) -> hậu xử lý -> 3 file. Không ném lỗi ra ngoài."""
     native, palette = character
     t0 = time.time()
-    log.info("%s bắt đầu: %d frame, %.1fs clip", tag, act.frames, act.duration)
+    if act.engine == "pose":
+        log.info("%s bắt đầu: %d frame, tư thế \"%s\"", tag, act.frames, act.pose)
+    else:
+        log.info("%s bắt đầu: %d frame, clip WAN %.1fs", tag, act.frames, act.duration)
+    animate = pipelines.animate_pose if act.engine == "pose" else pipelines.animate_video
     try:
-        frames, layout, info = pipelines.animate_video(
+        frames, layout, info = animate(
             client, cfg, native, palette, act,
-            description=job.prompt if job.mode == "prompt" else None, seed=job.seed,
+            description=job.prompt, seed=job.seed,  # mode "image": prompt (nếu có) mô tả ảnh mẫu
             debug_dir=job_dir / act.name / "debug" if cfg.debug else None)
         result = pipelines.finalize(frames, layout, act, cfg, job_dir / act.name,
                                     meta={"job": job.name, **info})
@@ -226,14 +243,34 @@ def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: 
 def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Path) -> list[str]:
     """Kiểm tra node, model, ảnh đầu vào TRƯỚC khi tốn giờ GPU."""
     problems = []
-    need_sd = any(j.mode == "prompt" and not _character_is_current(cfg, j, out / j.name)
-                  for j in cfg.jobs)
-    nodes = workflows.WAN_NODES + (workflows.SD15_NODES if need_sd else [])
+    actions = [a for j in cfg.jobs for a in j.actions]
+    use_video = any(a.engine == "video" for a in actions)
+    need_char = any(j.mode == "prompt" and not _character_is_current(cfg, j, out / j.name, jobs_dir)
+                    for j in cfg.jobs)
+    use_pose = any(a.engine == "pose" for a in actions) or (need_char and cfg.engine == "pose")
+    need_sd = need_char or use_pose
+    nodes = ((workflows.WAN_NODES if use_video else []) + (workflows.SD15_NODES if need_sd else [])
+             + (workflows.POSE_NODES if use_pose else []))
     for node in client.missing_nodes(sorted(set(nodes))):
         problems.append(f"node ComfyUI '{node}' (cập nhật ComfyUI lên bản mới)")
 
-    wanted = [("diffusion_models", cfg.wan["unet"]), ("text_encoders", cfg.wan["text_encoder"]),
-              ("vae", cfg.wan["vae"])]
+    wanted = []
+    if use_video:
+        wanted += [("diffusion_models", cfg.wan["unet"]), ("text_encoders", cfg.wan["text_encoder"]),
+                   ("vae", cfg.wan["vae"])]
+    if use_pose:
+        wanted.append(("controlnet", cfg.pose["controlnet"]))
+        if cfg.pose.get("ipadapter"):
+            reason = None
+            if client.missing_nodes(workflows.IPADAPTER_NODES):
+                reason = "chưa cài custom node ComfyUI_IPAdapter_plus"
+            elif not any("ip-adapter-plus_sd15" in m for m in client.list_models("ipadapter")):
+                reason = "thiếu model ipadapter/ip-adapter-plus_sd15.safetensors"
+            elif not any("CLIP-ViT-H-14" in m for m in client.list_models("clip_vision")):
+                reason = "thiếu model clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+            if reason:
+                cfg.pose["ipadapter"] = False
+                log.warning("Tắt IP-Adapter (%s): nhân vật sẽ kém giống nhau giữa các frame.", reason)
     if need_sd and cfg.checkpoint == "auto":
         checkpoints = client.list_models("checkpoints")
         if checkpoints:
@@ -250,9 +287,9 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
                             f"{', '.join(available[:8]) or 'không có gì'})")
 
     for job in cfg.jobs:
-        if job.mode == "image" and not _character_is_current(cfg, job, out / job.name):
-            if _resolve_path(job.character_image, jobs_dir) is None:
-                problems.append(f"ảnh nhân vật '{job.character_image}' của job {job.name}")
+        if job.mode == "image" and _resolve_path(job.character_image, jobs_dir) is None:
+            problems.append(f"ảnh nhân vật '{job.character_image}' của job {job.name} (đã tìm "
+                            f"cạnh jobs.json và theo tên file trong {', '.join(map(str, SEARCH_ROOTS))})")
     return problems
 
 
@@ -265,15 +302,17 @@ def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
     """
     job_dir.mkdir(parents=True, exist_ok=True)
     char_path = job_dir / "character.png"
-    if _character_is_current(cfg, job, job_dir):
+    user_image = job.mode == "image"
+    if _character_is_current(cfg, job, job_dir, jobs_dir):
         native = Image.open(char_path).convert("RGBA")
         log.info("[%s] dùng lại nhân vật có sẵn %s (%dx%d)", job.name, char_path.name, *native.size)
-        return native, pipelines.palette_of(native, cfg.palette), False
+        limit = 255 if user_image and not cfg.palette_explicit else cfg.palette
+        return native, pipelines.palette_of(native, limit), False
     if char_path.exists():
-        log.info("[%s] cấu hình nhân vật hoặc thuật toán đã đổi -> tạo lại nhân vật", job.name)
+        log.info("[%s] cấu hình/ảnh nhân vật hoặc thuật toán đã đổi -> tạo lại nhân vật", job.name)
 
     t0 = time.time()
-    info: dict = {"mode": job.mode, "fingerprint": character_fingerprint(cfg, job)}
+    info: dict = {"mode": job.mode, "fingerprint": character_fingerprint(cfg, job, jobs_dir)}
     if job.mode == "prompt":
         log.info("[%s] tạo nhân vật từ prompt...", job.name)
         raw, gen = pipelines.generate_character(client, cfg, job.prompt, job.seed)
@@ -282,8 +321,10 @@ def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
     else:
         src = _resolve_path(job.character_image, jobs_dir)
         info["source"] = str(src)
+        log.info("[%s] dùng ảnh mẫu %s", job.name, src)
         raw = Image.open(src)
-    native, palette = pipelines.prepare_character(raw, cfg)
+        raw.load()
+    native, palette = pipelines.prepare_character(raw, cfg, user_image=user_image)
     native.save(char_path)
     pixel.upscale(native, max(1, cfg.preview_scale * 2)).save(job_dir / "character_preview.png")
     info.update({"size": list(native.size), "colors": len(palette)})
@@ -295,6 +336,12 @@ def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
 
 
 # ------------------------------------------------------------------ tiện ích
+# Nơi tìm ảnh mẫu theo TÊN FILE khi đường dẫn không trỏ thẳng tới file. Kaggle gắn
+# dataset vào đường dẫn dài (VD /kaggle/input/datasets/<user>/<dataset>/...), người
+# dùng chỉ cần ghi "hero.png".
+SEARCH_ROOTS = [Path("/kaggle/input")]
+
+
 def _resolve_path(path: str | None, jobs_dir: Path) -> Path | None:
     if not path:
         return None
@@ -302,6 +349,12 @@ def _resolve_path(path: str | None, jobs_dir: Path) -> Path | None:
     for candidate in ([p] if p.is_absolute() else [jobs_dir / p, Path.cwd() / p]):
         if candidate.is_file():
             return candidate
+    for root in SEARCH_ROOTS:
+        found = sorted(f for f in root.rglob(p.name) if f.is_file()) if root.is_dir() else []
+        if found:
+            if len(found) > 1:
+                log.warning("Có %d file tên %s, dùng %s", len(found), p.name, found[0])
+            return found[0]
     return None
 
 

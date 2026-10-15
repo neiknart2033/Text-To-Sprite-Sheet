@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import matting, pixel, sheet, workflows
+from . import matting, pixel, poses, sheet, workflows
 from .comfy import ComfyClient, ComfyError
 from .config import VIEWS, Action, Settings
 
@@ -52,6 +52,10 @@ WAN_NEGATIVE = ("blurry, low quality, jpeg artifacts, watermark, text, letters, 
                 "back view, shadow, ground, floor, scenery, 3d render, realistic")
 FRAME_SEARCH = 2  # mỗi frame cần lấy được chọn frame "lành" nhất trong ±2 frame của clip
 
+# Engine pose: mô tả nhân vật + động tác; khung xương quyết định tư thế, IP-Adapter giữ ngoại hình.
+POSE_PROMPT = ("pixel art, game sprite, {character}{action}, single character, full body, "
+               "({view}:1.2), centered, simple white background")
+
 
 def resolve_seed(*candidates: int | None) -> int:
     """Seed đầu tiên khác None; giá trị âm (-1) = ngẫu nhiên mỗi lần gọi."""
@@ -68,13 +72,26 @@ def generate_character(client: ComfyClient, cfg: Settings, description: str,
     prompt = CHAR_PROMPT.format(description=description.strip().rstrip("."), view=VIEWS[cfg.view])
     negative = CHAR_NEGATIVE.format(other_view=OTHER_VIEW[cfg.view])
     first = resolve_seed(seed, cfg.seed)
+    # Engine pose: vẽ nhân vật theo khung xương đứng của chính thư viện tư thế -> đúng
+    # hướng nhìn ngang (SD hay tự vẽ nhìn thẳng) và cùng khung hình với các frame sau.
+    pose_name = None
+    if cfg.engine == "pose" and cfg.pose.get("controlnet"):
+        size = int(cfg.pose["size"])
+        pose_name = client.upload_image(poses.render(poses.NEUTRAL, size),
+                                        f"spriteforge_pose_{uuid.uuid4().hex[:12]}.png")
     tries, best = [], None
     for attempt in range(CHAR_ATTEMPTS):
         s = first + attempt
-        graph = workflows.sd15_txt2img(cfg.checkpoint_file or cfg.checkpoint, prompt, negative, s,
-                                       width=CHAR_SIZE[0], height=CHAR_SIZE[1], steps=cfg.steps,
-                                       cfg=cfg.cfg_scale, sampler=cfg.sampler,
-                                       scheduler=cfg.scheduler)
+        if pose_name:
+            graph = workflows.sd15_pose(
+                cfg.checkpoint_file or cfg.checkpoint, prompt, negative, s, pose_name,
+                cfg.pose["controlnet"], float(cfg.pose["strength"]), size=size,
+                steps=cfg.steps, cfg=cfg.cfg_scale, sampler=cfg.sampler, scheduler=cfg.scheduler)
+        else:
+            graph = workflows.sd15_txt2img(cfg.checkpoint_file or cfg.checkpoint, prompt, negative, s,
+                                           width=CHAR_SIZE[0], height=CHAR_SIZE[1], steps=cfg.steps,
+                                           cfg=cfg.cfg_scale, sampler=cfg.sampler,
+                                           scheduler=cfg.scheduler)
         raw = client.fetch(client.run(graph, workflows.SD15_OUTPUT, timeout_s=900)[0]).convert("RGB")
         bg_ok, measured = matting.matches_key(raw, CHAR_BG)
         inside = not pixel.touches_edge(matting.cutout_flat(raw))
@@ -100,8 +117,28 @@ def cutout(image: Image.Image) -> Image.Image:
     return matting.cutout_flat(image.convert("RGB"))
 
 
-def prepare_character(image: Image.Image, cfg: Settings) -> tuple[Image.Image, np.ndarray]:
-    native, palette = pixel.prepare_character(cutout(image), cfg.char_height, cfg.palette)
+def prepare_character(image: Image.Image, cfg: Settings,
+                      user_image: bool = False) -> tuple[Image.Image, np.ndarray]:
+    """Ảnh nhân vật -> sprite pixel gốc + palette.
+
+    user_image (mode "image"): giữ đúng sprite mẫu của người dùng. Ảnh phóng to (VD x4)
+    được thu về pixel gốc theo đúng lưới; không ép về char_height/palette mặc định trừ
+    khi jobs.json khai báo rõ (hoặc nhân vật quá lớn so với ô frame_size).
+    """
+    cut = cutout(image)
+    height, colors = cfg.char_height, cfg.palette
+    if user_image:
+        k = pixel.detect_block_size(cut)
+        if k > 1:
+            cut = pixel.resize_premultiplied(cut, (cut.width // k, cut.height // k))
+            log.info("Ảnh mẫu đang phóng x%d -> thu về pixel gốc %dx%d", k, cut.width, cut.height)
+        if not cfg.char_height_explicit:
+            box = pixel.bbox(cut)
+            native_h = (box[3] - box[1]) if box else height
+            height = min(native_h, round(cfg.frame_size * 0.8))
+        if not cfg.palette_explicit:
+            colors = 255
+    native, palette = pixel.prepare_character(cut, height, colors)
     holes = pixel.hole_ratio(native)
     if holes > 0.04:
         log.warning("Nhân vật bị thủng %.0f%% thân sau khi tách nền: animation sẽ lỗi. Xem "
@@ -174,7 +211,7 @@ def animate_video(client: ComfyClient, cfg: Settings, native: Image.Image,
                          f"không phải màu {key}. Thử đặt \"bg_color\" khác.")
     if empty:
         log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
-    return frames, layout, {"seed": seed, "prompt": prompt, "clip_length": len(files),
+    return frames, layout, {"engine": "video", "seed": seed, "prompt": prompt, "clip_length": len(files),
                             "target_indices": targets, "frame_indices": chosen, "key_color": key,
                             "key_tolerance": round(tolerance, 1), "scale_k": layout.k}
 
@@ -203,6 +240,84 @@ def _pick_frames(targets: list[int], n_clip: int, native_frame) -> list[int]:
             continue
         chosen.append(min(range(lo, hi + 1), key=lambda i: (badness(i), abs(i - t))))
     return chosen
+
+
+def reference_image(native: Image.Image, size: int) -> Image.Image:
+    """Ảnh mẫu cho IP-Adapter: nhân vật phóng NEAREST, đứng đúng chỗ khung xương, nền trắng."""
+    k = max(1, round(poses.standing_height_px(size) / max(1, native.height)))
+    up = pixel.upscale(native, k)
+    hip_x, ground_y = poses.ground_px(size)
+    canvas = Image.new("RGB", (size, size), (255, 255, 255))
+    canvas.paste(up, (round(hip_x - up.width / 2), round(ground_y - up.height)), up)
+    return canvas
+
+
+def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,
+                 palette: np.ndarray, action: Action, description: str | None = None,
+                 seed: int | None = None, debug_dir: str | Path | None = None,
+                 ) -> tuple[list[Image.Image], pixel.VideoLayout, dict]:
+    """Engine pose: mỗi frame = SD1.5 + ControlNet OpenPose (+ IP-Adapter) theo thư viện tư thế.
+
+    Mọi frame cùng seed, cùng khung xương tỉ lệ, cùng đường nền -> không zoom, không trôi,
+    số frame đúng chính xác. Ảnh SD (nền trắng) được tách nền và thu về pixel gốc theo
+    MỘT tỉ lệ chung cho mọi action (chiều cao đứng của nhân vật = chiều cao sprite gốc).
+    """
+    p = cfg.pose
+    size = int(p["size"])
+    keys = poses.sequence(action.pose or action.name, action.frames)
+    seed = resolve_seed(action.seed, seed, cfg.seed)
+    ref_name = None
+    if p.get("ipadapter"):
+        ref_name = client.upload_image(reference_image(native, size),
+                                       f"spriteforge_ref_{uuid.uuid4().hex[:12]}.png")
+    character = f"{description.strip().rstrip('.')}, " if description else ""
+    prompt = POSE_PROMPT.format(character=character, action=action.prompt.strip().rstrip("."),
+                                view=VIEWS[cfg.view])
+    negative = CHAR_NEGATIVE.format(other_view=OTHER_VIEW[cfg.view])
+
+    scale = native.height / poses.standing_height_px(size)
+    side = max(8, round(size * scale))
+    hip_x, ground_y = poses.ground_px(size)
+    layout = pixel.VideoLayout(k=1, width=side, height=side,
+                               center_x=hip_x * scale, ground_y=ground_y * scale)
+    frames, skeletons, raws = [], [], []
+    for key in keys:
+        skeleton = poses.render(key, size)
+        pose_name = client.upload_image(skeleton, f"spriteforge_pose_{uuid.uuid4().hex[:12]}.png")
+        graph = workflows.sd15_pose(
+            cfg.checkpoint_file or cfg.checkpoint, prompt, negative, seed, pose_name,
+            p["controlnet"], float(p["strength"]), reference_image=ref_name,
+            ipadapter_weight=float(p["ipadapter_weight"]), ipadapter_preset=str(p["ipadapter_preset"]),
+            size=size, steps=cfg.steps, cfg=cfg.cfg_scale, sampler=cfg.sampler,
+            scheduler=cfg.scheduler)
+        raw = client.fetch(client.run(graph, workflows.POSE_OUTPUT, timeout_s=900)[0]).convert("RGB")
+        frames.append(pixel.frame_to_native(matting.cutout_flat(raw), (side, side), palette))
+        skeletons.append(skeleton)
+        raws.append(raw)
+    if debug_dir:  # khung xương + ảnh SD gốc từng frame, để soi lỗi
+        debug_dir = Path(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        _strip(skeletons, debug_dir / "poses.png")
+        _strip(raws, debug_dir / "raw.png")
+    empty = sum(pixel.bbox(f) is None for f in frames)
+    if empty == len(frames):
+        raise ComfyError("Mọi frame đều trống sau khi tách nền: SD không vẽ nhân vật trên nền "
+                         "trắng. Xem debug/raw.png.")
+    if empty:
+        log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
+    return frames, layout, {"engine": "pose", "pose": action.pose, "seed": seed, "prompt": prompt,
+                            "ipadapter": bool(ref_name), "scale": round(scale, 4)}
+
+
+def _strip(images: list[Image.Image], path: Path, height: int = 256) -> None:
+    """Ghép các ảnh thành một hàng (thu nhỏ) để xem nhanh."""
+    small = [im.resize((height * im.width // im.height, height)) for im in images]
+    out = Image.new("RGB", (sum(im.width for im in small), height), (0, 0, 0))
+    x = 0
+    for im in small:
+        out.paste(im, (x, 0))
+        x += im.width
+    out.save(path)
 
 
 def _save_clip(clip: list[Image.Image], path: Path) -> None:

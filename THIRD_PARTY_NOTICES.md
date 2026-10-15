@@ -9,6 +9,8 @@ do tool tạo ra là của bạn; giấy phép code không áp lên ảnh đầu
 - Nguồn: https://github.com/velteyn/pixel-art-studio (commit `979168c`, 28/07/2026)
 - Tác giả: velteyn
 - Phần dùng lại (đã chỉnh sửa):
+  - `forge/poses.py` + engine pose ← ý tưởng triple-ControlNet và pose asset library
+    (`pipeline/pose_gen.py`, `pipeline/pose_asset_library.py`); khung xương sinh bằng code mới
   - `forge/sheet.py` ← `pipeline/spritesheet.py` (đóng gói sheet, manifest, GIF)
   - `forge/pixel.py` ← ý tưởng từ `pipeline/mixel_fix.py` (lượng tử palette),
     `pipeline/pixel_snap.py` (lấy đa số trong khối), `pipeline/frame_align.py` (neo chân)
@@ -55,6 +57,10 @@ SOFTWARE.
 |---|---|---|
 | WAN 2.2 TI2V 5B (`Comfy-Org/Wan_2.2_ComfyUI_Repackaged`) | Apache-2.0 | Không hạn chế |
 | Checkpoint SD1.5 pixel art (Civitai) | Theo từng model | Đọc giấy phép trên trang model, nhất là khi dùng thương mại |
+| ControlNet v1.1 OpenPose fp16 (`comfyanonymous/ControlNet-v1-1_fp16_safetensors`) | OpenRAIL | Engine pose |
+| IP-Adapter Plus SD1.5 (`h94/IP-Adapter`) | Apache-2.0 | Engine pose |
+| CLIP-ViT-H-14 laion2B (image encoder trong `h94/IP-Adapter`) | MIT | Engine pose |
 | ~~MiniMax H3~~ | MiniMax H3 Community License | **Không dùng**: cấm EU/UK/Hàn Quốc/Mỹ (cả ảnh đầu ra), quá nặng cho Kaggle |
 
-ComfyUI (GPL-3.0) được cài riêng lúc chạy và giao tiếp qua HTTP.
+ComfyUI (GPL-3.0) và custom node ComfyUI_IPAdapter_plus (cubiq, GPL-3.0) được cài riêng lúc
+chạy và giao tiếp qua HTTP.

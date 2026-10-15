@@ -5,12 +5,19 @@ hành động: `spritesheet.png` + `manifest.json` + `preview.gif`.
 
 Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`):
 
-1. **Nhân vật:** checkpoint SD1.5 pixel art vẽ nhân vật trên nền trắng (512×768). Sau đó
-   tách nền, thu về kích thước pixel gốc (mặc định cao 64px) và rút palette màu.
-2. **Chuyển động:** WAN 2.2 TI2V 5B nhận ảnh nhân vật + câu mô tả hành động,
-   rồi tạo một clip video ngắn. Tool lấy N frame cách đều từ clip.
+1. **Nhân vật:** checkpoint SD1.5 pixel art vẽ nhân vật đứng nhìn ngang trên nền trắng (theo
+   khung xương đứng). Hoặc dùng sprite có sẵn của bạn. Sau đó tách nền, thu về pixel gốc,
+   rút palette màu.
+2. **Chuyển động (engine `pose`, mặc định):** mỗi action có sẵn một chuỗi **khung xương tư
+   thế** (đi, chạy, chém, nhảy...). Mỗi frame được SD1.5 vẽ lại theo đúng khung xương đó
+   (ControlNet OpenPose), dùng ảnh nhân vật làm mẫu để giữ ngoại hình (IP-Adapter), cùng
+   một seed cho cả action. Vì khung xương cố định tỉ lệ và đường nền nên nhân vật không
+   bị zoom, trôi hay biến mất, và số frame luôn đúng.
 3. **Hậu xử lý:** tách nền, đưa về pixel gốc, ép đúng palette của nhân vật,
    đặt vào các ô vuông cùng kích thước, rồi xuất sheet, manifest và GIF.
+
+Engine cũ `"engine": "video"` (WAN 2.2 tạo clip rồi cắt frame) vẫn dùng được, nhưng chạy
+thật cho thấy WAN hay làm nhân vật pixel nhỏ bị zoom, biến hình hoặc tan biến.
 
 ---
 
@@ -25,7 +32,10 @@ không bật được GPU và Internet.
    ví dụ `aziibpixelmix`, `PixelMonster` hoặc `Pixel Art Sprite Diffusion` trên Civitai.
 2. kaggle.com → **Datasets** → **New Dataset** → upload file → đặt tên
    `spriteforge-models` → chọn **Private** → Create.
-### 1.2b Model WAN: notebook `SpriteForge Models` (làm 1 lần, khỏi tải 17GB mỗi session)
+### 1.2b Notebook `SpriteForge Models` (làm 1 lần, khỏi tải model mỗi session)
+Mặc định notebook này lưu model của engine tư thế (~3.3GB): ControlNet OpenPose, IP-Adapter Plus,
+CLIP-ViT-H. Đặt `INCLUDE_WAN = True` nếu cần cả WAN (~17GB) cho engine video. Bỏ qua bước
+này thì cell 2 của notebook chính tự tải các model engine tư thế mỗi session (vài phút).
 Không cần upload từ máy bạn: Kaggle tự tải từ HuggingFace về rồi lưu lại.
 1. **Code** → **New Notebook** → *File → Import Notebook* → chọn `kaggle/SpriteForge_Models.ipynb`.
 2. *Session options*: **Accelerator = None** (chỉ dùng CPU, không tốn quota GPU), **Internet = On**.
@@ -111,7 +121,8 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
     {
       "name": "chibi",
       "mode": "image",
-      "character_image": "/kaggle/input/spriteforge-chars/chibi.png",
+      "character_image": "chibi.png",
+      "prompt": "chibi samurai with a red headband",
       "actions": [{"name": "jump", "prompt": "jumps straight up and lands", "frames": 6}]
     }
   ]
@@ -132,23 +143,44 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 | `view` | `"side"` | `"side"` (nhìn ngang, quay phải) hoặc `"front"` |
 | `bg_color` | `"auto"` | Màu nền của canvas đưa vào WAN (nhân vật SD luôn vẽ nền trắng). `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
-| `debug` | `true` | Lưu `debug/input.png` (ảnh đưa vào WAN) và `debug/clip.gif` (cả clip WAN trả về) cho mỗi action, để soi lỗi |
+| `engine` | `"pose"` | `"pose"` (khung xương + SD1.5) hoặc `"video"` (WAN 2.2). Có thể đặt riêng cho từng action |
+| `pose` | xem dưới | `strength` (1.0: độ bám khung xương), `ipadapter` (true), `ipadapter_weight` (0.8: độ giống nhân vật mẫu; cao quá thì tư thế kém đúng), `size` (512) |
+| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `poses.png` (khung xương) + `raw.png` (ảnh SD gốc); engine video có `input.png` + `clip.gif` |
 | `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
 `prompt`) hoặc `"image"` (cần `character_image`); `seed` (tùy chọn); `actions`.
-Với `mode: "image"`, ảnh nên có nền trong suốt hoặc nền một màu. Upload ảnh
-thành dataset (ví dụ `spriteforge-chars`) rồi trỏ đường dẫn tuyệt đối vào `/kaggle/input/...`.
+
+### Dùng sprite mẫu có sẵn (`mode: "image"`)
+Không cần checkpoint SD: tool lấy thẳng nhân vật trong ảnh của bạn rồi tạo các action.
+Mẫu đầy đủ: `kaggle/jobs.image.example.json`.
+1. **Chuẩn bị ảnh**: PNG **nền trong suốt** (tốt nhất) hoặc nền **một màu phẳng**. Một nhân
+   vật, đứng, nhìn ngang quay phải (khớp `"view": "side"`). Ảnh pixel gốc hoặc đã phóng
+   to đều được: ảnh phóng x2, x4... tự được thu về pixel gốc.
+2. **Upload lên Kaggle**: trong notebook → **Add Input** → **Upload** (hoặc *New Dataset*) →
+   kéo thả file PNG (nhiều nhân vật thì kéo nhiều file) → đặt tên dataset, ví dụ `my-sprites` → Create.
+3. **Ghi vào `jobs.json`** (cell 5): `"character_image": "hero.png"`. **Chỉ cần tên file**: tool tự
+   tìm trong mọi Input đã gắn. Thêm `"prompt"` mô tả nhân vật (tiếng Anh) để WAN hiểu
+   đúng nhân vật hơn (không bắt buộc).
+4. Chạy cell 6 như bình thường.
+
+Tool giữ nguyên sprite của bạn: không ép về `char_height`, giữ mọi màu gốc (tối đa 255).
+Chỉ thu nhỏ khi nhân vật cao hơn 80% `frame_size`; khi đó hãy tăng `frame_size`
+(VD sprite cao 100px → `"frame_size": 160`). Muốn ép cỡ hoặc số màu thì khai báo rõ
+`char_height`, `palette`. Upload bản sửa của ảnh (cùng tên) rồi chạy lại → tool tự nhận
+ra và làm lại.
 
 **Mỗi action:**
 
 | Trường | Mặc định | Ý nghĩa |
 |---|---|---|
 | `name`, `prompt` | bắt buộc | Tên thư mục; câu mô tả động tác **bằng tiếng Anh** |
+| `pose` | `= name` | Tư thế mẫu (engine pose). Có sẵn: `idle`, `walk`, `run`, `attack`, `heavy`, `hurt`, `jump`, `death`, `block`, `dash`, `crouch`, `fall`, `cast`, `kick`, `punch`. Action tên khác thì ghi rõ, VD `{"name": "slash2", "pose": "attack", ...}` |
+| `engine` | theo `engine` chung | `"pose"` hoặc `"video"` cho riêng action này |
 | `frames` | `8` | Số frame trong sheet (1–64) |
 | `columns` | `= frames` | Số cột (mặc định 1 hàng) |
-| `duration` | `wan.duration` | Độ dài clip (giây). Động tác dài như `death` thì đặt 3 |
-| `align` | `"fixed"` | `fixed` giữ nguyên vị trí thật (nhảy, chém). `track` bỏ phần trôi ngang (đi, chạy) |
+| `duration` | `wan.duration` | (engine video) Độ dài clip (giây) |
+| `align` | `"fixed"` | `fixed` giữ nguyên vị trí thật (nhảy, chém). `track` bỏ phần trôi ngang (engine video) |
 | `loop` | `true` | Ghi vào manifest |
 | `seed` | theo job | Seed riêng cho action |
 
@@ -191,6 +223,10 @@ output/
 
 | Thông báo | Cách xử lý |
 |---|---|
+| `Tắt IP-Adapter (...)` | Thiếu custom node hoặc model IP-Adapter: engine pose vẫn chạy nhưng nhân vật kém giống nhau giữa các frame. Xem cell 2 có tải đủ `ip-adapter-plus_sd15` và `CLIP-ViT-H-14...` không |
+| `chưa có tư thế mẫu "..."` | Tên action không trùng tư thế có sẵn: thêm `"pose": "<tên có sẵn>"` vào action đó |
+| Nhân vật sai tư thế / sai hướng (engine pose) | Mở `debug/poses.png` (khung xương) và `debug/raw.png` (ảnh SD gốc). Nhân vật không theo khung xương: tăng `pose.strength` (VD 1.2) hoặc giảm `pose.ipadapter_weight` (VD 0.6) |
+| Nhân vật khác nhau giữa các frame (engine pose) | Tăng `pose.ipadapter_weight` (VD 0.9–1.0), viết `prompt` của job mô tả rõ màu sắc và trang phục |
 | `Thiếu: node ComfyUI 'Wan22ImageToVideoLatent'` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |
 | `Thiếu: model '...' trong checkpoints/` | Tên trong `jobs.json` sai: xem danh sách "ComfyUI đang thấy", hoặc dùng `"checkpoint": "auto"` |
 | `Frame ... gần như một màu (đen/trống)` | WAN chạy fp16 trên T4 có thể sinh NaN. Thử thêm `"--fp32-vae"` vào lệnh khởi động ComfyUI ở cell 3, hoặc đổi seed |
@@ -214,9 +250,10 @@ output/
 | Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
 | Khởi động ComfyUI | ~1–2 phút |
 | 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
+| **1 frame engine pose (512², 30 steps, ControlNet + IP-Adapter)** | **~6–10 giây** (ước tính, chưa đo) |
+| **1 action 8 frame, engine pose** | **~1–1.5 phút** mỗi GPU (ước tính) |
 | 1 action WAN ở 448² (clip 2s = 49 frame, 20 steps) | ~1 phút 24 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
-| **1 action WAN ở 640² (mặc định từ v3)** | **~3 phút** mỗi GPU (ước tính: gấp đôi số token) |
-| **21 action, T4 x2, 640²** | **~30–35 phút** (ước tính) |
+| 1 action WAN ở 640² | ~3 phút mỗi GPU (ước tính) |
 
 Vì sao 640 mà không 448: WAN 2.2 5B nén 32×32 pixel thành 1 token; ở 448 nhân vật chỉ rộng
 vài token nên clip thật bị biến hình, zoom, tan biến. Muốn nhanh hơn (chấp nhận rủi ro đó): `"wan": {"width": 448, "height": 448}`.

@@ -27,6 +27,9 @@ MODELS = {
     "diffusion_models": ["wan2.2_ti2v_5B_fp16.safetensors"],
     "text_encoders": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
     "vae": ["wan2.2_vae.safetensors"],
+    "controlnet": ["control_v11p_sd15_openpose_fp16.safetensors"],
+    "ipadapter": ["ip-adapter-plus_sd15.safetensors"],
+    "clip_vision": ["CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
 }
 
 
@@ -74,8 +77,37 @@ def fake_video(start: Image.Image, length: int, seed: int) -> list[Image.Image]:
     return frames
 
 
+def fake_pose_frame(pose: Image.Image, sprite: Image.Image, bg: str, cut: bool,
+                    seed: int) -> Image.Image:
+    """Mô phỏng SD + ControlNet: vẽ nhân vật đúng chỗ và đúng chiều cao của khung xương."""
+    rng = np.random.default_rng(seed)
+    size = pose.size
+    color = {"black": (0, 0, 0), "white": (245, 245, 245), "green": (40, 190, 80)}[bg]
+    a = np.zeros((size[1], size[0], 3), np.int16)
+    a[:] = color
+    if bg != "black":
+        a += rng.integers(-4, 5, a.shape, dtype=np.int16)
+    canvas = Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")
+    x0, y0, x1, y1 = pose.convert("L").point(lambda v: 255 if v > 20 else 0).getbbox()
+    h = round((y1 - y0) * 1.08)  # khung xương không có đỉnh đầu
+    w = max(1, round(sprite.width * h / sprite.height))
+    body = sprite.resize((w, h), Image.NEAREST)
+    top = y1 - h + (150 if cut else 0)
+    canvas.paste(body, (round((x0 + x1) / 2 - w / 2), top), body)
+    return canvas
+
+
+def _sprite_from(image: Image.Image) -> Image.Image:
+    """Nhân vật (RGBA, cắt sát) từ ảnh nền trơn: dùng cho ảnh mẫu IP-Adapter."""
+    a = np.asarray(image.convert("RGB")).astype(np.int16)
+    mask = np.abs(a - a[0, 0]).max(2) > 30
+    rgba = Image.fromarray(np.dstack([a.astype(np.uint8), (mask * 255).astype(np.uint8)]), "RGBA")
+    return rgba.crop(rgba.getbbox())
+
+
 class FakeComfy:
-    def __init__(self):
+    def __init__(self, ipadapter: bool = True):
+        self.ipadapter = ipadapter
         self.uploads: dict[str, Image.Image] = {}
         self.files: dict[str, Image.Image] = {}
         self.history: dict[str, dict] = {}
@@ -117,7 +149,13 @@ class FakeComfy:
             seed = graph["3"]["inputs"]["seed"]
             bg = ("black" if "BLACKBG" in texts else
                   "white" if "white background" in texts else "green")
-            images = [fake_character(seed, bg=bg, cut="CUTFEET" in texts)]
+            if "ControlNetApplyAdvanced" in classes:
+                pose = self.uploads[graph["21"]["inputs"]["image"]]
+                ref = graph.get("31", {}).get("inputs", {}).get("image")
+                sprite = _sprite_from(self.uploads[ref] if ref else fake_character(seed, bg="white"))
+                images = [fake_pose_frame(pose, sprite, bg, "CUTFEET" in texts, seed)]
+            else:
+                images = [fake_character(seed, bg=bg, cut="CUTFEET" in texts)]
             out_node = workflows.SD15_OUTPUT
         infos = []
         for im in images:
@@ -148,7 +186,9 @@ class FakeComfy:
                 if url.path == "/system_stats":
                     return self._json({"system": {"os": "fake"}, "devices": []})
                 if url.path == "/object_info":
-                    nodes = set(workflows.WAN_NODES) | set(workflows.SD15_NODES)
+                    nodes = set(workflows.WAN_NODES) | set(workflows.SD15_NODES) | set(workflows.POSE_NODES)
+                    if fake.ipadapter:
+                        nodes |= set(workflows.IPADAPTER_NODES)
                     return self._json({n: {} for n in nodes})
                 if url.path.startswith("/models/"):
                     return self._json(MODELS.get(url.path.split("/")[-1], []))

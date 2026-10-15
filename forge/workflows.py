@@ -15,9 +15,20 @@ WAN_NODES = ["UNETLoader", "CLIPLoader", "VAELoader", "LoadImage", "CLIPTextEnco
              "ModelSamplingSD3", "Wan22ImageToVideoLatent", "KSampler", "VAEDecode",
              "PreviewImage"]
 
+POSE_NODES = SD15_NODES + ["LoadImage", "ControlNetLoader", "ControlNetApplyAdvanced"]
+# Custom node ComfyUI_IPAdapter_plus (cubiq). Thiếu thì engine pose vẫn chạy, chỉ yếu
+# khả năng giữ ngoại hình nhân vật giữa các frame.
+IPADAPTER_NODES = ["IPAdapterUnifiedLoader", "IPAdapter"]
+
 # Node đầu ra của từng graph (để lấy ảnh từ history)
 SD15_OUTPUT = "9"
+POSE_OUTPUT = "9"
 WAN_OUTPUT = "10"
+
+# Ô chọn kiểu "enum" mà các phiên bản node hay đổi tên giá trị: giá trị không còn hợp lệ
+# thì thay bằng lựa chọn đầu tiên. KHÔNG áp dụng cho tên file (model, ảnh): thay âm
+# thầm sang file khác còn tệ hơn báo lỗi.
+FLEXIBLE_CHOICES = {"weight_type", "preset", "combine_embeds", "embeds_scaling"}
 
 # WAN 2.2 TI2V 5B: 24 fps, độ dài clip hợp lệ = 4n + 1
 WAN_FPS = 24
@@ -41,6 +52,61 @@ def sd15_txt2img(checkpoint: str, prompt: str, negative: str, seed: int,
         "8": {"class_type": "VAEDecode", "inputs": {"samples": ["3", 0], "vae": ["4", 2]}},
         SD15_OUTPUT: {"class_type": "PreviewImage", "inputs": {"images": ["8", 0]}},
     }
+
+
+def sd15_pose(checkpoint: str, prompt: str, negative: str, seed: int, pose_image: str,
+              controlnet: str, strength: float = 1.0, reference_image: str | None = None,
+              ipadapter_weight: float = 0.8, ipadapter_preset: str = "PLUS (high strength)",
+              size: int = 512, steps: int = 30, cfg: float = 7.0, sampler: str = "euler",
+              scheduler: str = "normal") -> dict:
+    """SD1.5 + ControlNet OpenPose (+ IP-Adapter giữ ngoại hình nếu có ảnh mẫu)."""
+    graph = sd15_txt2img(checkpoint, prompt, negative, seed, width=size, height=size,
+                         steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler)
+    graph["20"] = {"class_type": "ControlNetLoader", "inputs": {"control_net_name": controlnet}}
+    graph["21"] = {"class_type": "LoadImage", "inputs": {"image": pose_image}}
+    graph["22"] = {"class_type": "ControlNetApplyAdvanced", "inputs": {
+        "positive": ["6", 0], "negative": ["7", 0], "control_net": ["20", 0], "image": ["21", 0],
+        "strength": strength, "start_percent": 0.0, "end_percent": 1.0}}
+    graph["3"]["inputs"]["positive"] = ["22", 0]
+    graph["3"]["inputs"]["negative"] = ["22", 1]
+    if reference_image:
+        graph["30"] = {"class_type": "IPAdapterUnifiedLoader",
+                       "inputs": {"model": ["4", 0], "preset": ipadapter_preset}}
+        graph["31"] = {"class_type": "LoadImage", "inputs": {"image": reference_image}}
+        graph["32"] = {"class_type": "IPAdapter", "inputs": {
+            "model": ["30", 0], "ipadapter": ["30", 1], "image": ["31", 0],
+            "weight": ipadapter_weight, "start_at": 0.0, "end_at": 1.0, "weight_type": "standard"}}
+        graph["3"]["inputs"]["model"] = ["32", 0]
+    return graph
+
+
+def fill_defaults(graph: dict, object_info: dict) -> list[str]:
+    """Bổ sung input bắt buộc còn thiếu (lấy giá trị mặc định từ /object_info) và sửa giá
+    trị enum đã đổi tên. Giúp graph chạy được qua nhiều phiên bản ComfyUI/custom node.
+    Trả về danh sách thay đổi để ghi log."""
+    changes = []
+    for node_id, node in graph.items():
+        spec = (object_info.get(node["class_type"]) or {}).get("input", {}).get("required", {})
+        for name, desc in spec.items():
+            if not isinstance(desc, (list, tuple)) or not desc:
+                continue
+            kind = desc[0]
+            opts = desc[1] if len(desc) > 1 and isinstance(desc[1], dict) else {}
+            choices = kind if isinstance(kind, list) else (opts.get("options") if kind == "COMBO" else None)
+            value = node["inputs"].get(name)
+            if value is None:
+                if "default" in opts:
+                    node["inputs"][name] = opts["default"]
+                elif choices:
+                    node["inputs"][name] = choices[0]
+                else:
+                    continue
+                changes.append(f"{node['class_type']}.{name} = {node['inputs'][name]!r} (mặc định)")
+            elif (choices and name in FLEXIBLE_CHOICES and not isinstance(value, list)
+                  and value not in choices):
+                node["inputs"][name] = choices[0]
+                changes.append(f"{node['class_type']}.{name}: {value!r} không còn hợp lệ -> {choices[0]!r}")
+    return changes
 
 
 def wan22_i2v(image_name: str, prompt: str, negative: str, seed: int,

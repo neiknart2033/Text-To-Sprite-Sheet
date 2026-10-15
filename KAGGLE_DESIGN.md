@@ -7,6 +7,11 @@
 **v2 (15/10/2026):** ghép hai dự án mã nguồn mở. Engine animation Phase 1 là
 **WAN 2.2 TI2V 5B (video)**, thay cho "grid img2img" của v1.
 
+**v4 (15/10/2026): engine mặc định đổi sang `pose`** (mục 4b). Ba lần chạy thật với WAN
+(448px) cho clip bị zoom, biến hình, bóng mờ, tan biến (xem `debug/clip.gif`): WAN 5B nén
+32x32 px thành 1 token, sprite nhỏ chỉ vài token nên không giữ được hình; hậu xử lý không cứu
+được lỗi kéo dài nhiều frame. WAN vẫn còn qua `"engine": "video"`.
+
 ---
 
 ## 1. Mục tiêu
@@ -258,12 +263,32 @@ pipeline phát hiện và báo lỗi rõ ràng. Cách thử: `--fp32-vae`.
 
 Chạy test local: `python -m unittest tests.test_forge -v` (không cần GPU).
 
+## 4b. Engine `pose` (mặc định từ v4)
+
+Ý tưởng triple-ControlNet của Pixel Art Studio, làm lại cho ComfyUI:
+
+- **Thư viện tư thế** `forge/poses.py`: 15 preset nhìn ngang quay phải (`idle walk run attack
+  heavy hurt jump death block dash crouch fall cast kick punch`), mỗi preset là vài keyframe
+  (góc khớp: thân, đầu, vai/khuỷu, hông/gối cho phía gần/xa, dx, độ cao nhảy). Động học thuận
+  -> 18 điểm OpenPose; nội suy cosine ra đúng N frame (loop: chia đều một vòng, không lặp
+  frame cuối). Điểm thấp nhất luôn chạm đường nền (+ `air` khi nhảy) -> mọi frame/action cùng
+  tỉ lệ, cùng đường nền. Vẽ đúng màu/độ dày của `controlnet_aux.draw_bodypose`.
+- **Mỗi frame**: `CheckpointLoaderSimple` -> (`IPAdapterUnifiedLoader` "PLUS" + `IPAdapter` với
+  ảnh nhân vật phóng NEAREST trên nền trắng) -> `ControlNetApplyAdvanced` (openpose fp16) ->
+  `KSampler` (cùng seed cho cả action) -> nền trắng. Hậu xử lý: `cutout_flat` -> thu về pixel
+  gốc theo tỉ lệ `chiều cao sprite / chiều cao đứng của khung xương` (chung cho mọi action)
+  -> ép palette nhân vật -> `place_in_cells` (layout cố định, không trôi).
+- **Nhân vật** (mode prompt): vẽ bằng ControlNet theo khung xương đứng `NEUTRAL` -> đúng
+  hướng nhìn ngang và cùng khung hình với các frame.
+- **IP-Adapter** (cubiq/ComfyUI_IPAdapter_plus, repo đã lưu trữ): thiếu node/model -> preflight
+  tắt kèm cảnh báo, engine vẫn chạy. `workflows.fill_defaults` đọc `/object_info` để điền input
+  bắt buộc còn thiếu và sửa enum đổi tên (`weight_type`, `preset`...) giữa các phiên bản.
+- Model: `control_v11p_sd15_openpose_fp16` (0.7GB), `ip-adapter-plus_sd15` (0.1GB),
+  `CLIP-ViT-H-14-laion2B-s32B-b79K` (2.5GB) - cell 2 tìm trong Input theo tên, thiếu thì tải HF.
+
 ## 11. Phase 2 (chưa làm)
 
-- **Engine pose-ControlNet** (từ Pixel Art Studio), chọn theo action (`"engine": "pose"`):
-  chuyển 3 unit sang node core ComfyUI (`ControlNetLoader` + `ControlNetApplyAdvanced` cho
-  openpose/depth), thay `reference_adain+attn` (chỉ có ở A1111) bằng IPAdapter (custom node),
-  mở rộng thư viện pose (hiện 2–6 frame/action, thiếu attack/hurt).
+- Engine pose: thêm ControlNet depth/lineart, LoRA nhân vật, thêm preset theo 21 trạng thái game.
 - Nhiều hướng nhìn (Pixel Art Studio có `direction_gen`: south/east/west/north).
 - Train LoRA riêng cho từng nhân vật để khoá identity.
 - Auto-push output lên HuggingFace Dataset sau mỗi batch.

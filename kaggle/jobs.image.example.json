@@ -1,0 +1,23 @@
+{
+  "checkpoint": "auto",
+  "frame_size": 128,
+  "fps": 10,
+  "view": "side",
+  "jobs": [
+    {
+      "name": "hero",
+      "mode": "image",
+      "character_image": "hero.png",
+      "prompt": "a knight in silver armor with a red cape and a long sword",
+      "actions": [
+        {"name": "idle",   "prompt": "standing still in a ready stance, calm breathing", "frames": 8},
+        {"name": "walk",   "prompt": "walking in place, steady walk cycle", "frames": 8, "align": "track"},
+        {"name": "run",    "prompt": "running in place, fast run cycle, leaning forward", "frames": 8, "align": "track"},
+        {"name": "attack", "prompt": "swings the sword horizontally, then returns to stance", "frames": 8},
+        {"name": "hurt",   "prompt": "recoils backward from a hit, then recovers", "frames": 6, "loop": false},
+        {"name": "jump",   "prompt": "crouches, jumps straight up, then lands", "frames": 6, "loop": false},
+        {"name": "death",  "prompt": "staggers, drops to the knees and collapses to the ground", "frames": 8, "loop": false, "duration": 3.0}
+      ]
+    }
+  ]
+}

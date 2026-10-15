@@ -18,7 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "kaggle"))
 
-from forge import comfy, config, matting, pipelines, pixel, sheet, workflows  # noqa: E402
+from forge import comfy, config, matting, pipelines, pixel, poses, sheet, workflows  # noqa: E402
 from tests.fake_comfy import FakeComfy, fake_character  # noqa: E402
 
 import run_batch  # noqa: E402
@@ -86,6 +86,12 @@ class UnitTests(unittest.TestCase):
         native, _ = pipelines.prepare_character(raw, self._cfg())
         self.assertEqual(native.height, 64)
 
+    def test_detect_block_size(self):
+        native, _ = pipelines.prepare_character(fake_character(9), self._cfg())
+        self.assertEqual(pixel.detect_block_size(native), 1)
+        for k in (2, 4, 7):
+            self.assertEqual(pixel.detect_block_size(pixel.upscale(native, k)), k)
+
     def test_touches_edge(self):
         self.assertFalse(pixel.touches_edge(matting.cutout_flat(fake_character(6, bg="white"))))
         self.assertTrue(pixel.touches_edge(matting.cutout_flat(fake_character(6, bg="white", cut=True))))
@@ -131,7 +137,7 @@ class UnitTests(unittest.TestCase):
     def test_gif_keeps_transparency(self):
         f = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
         f.paste((255, 0, 0, 255), (4, 4, 12, 12))
-        with tempfile.TemporaryDirectory() as d:
+        with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             path = Path(d) / "a.gif"
             sheet.save_gif([f, f.transpose(Image.FLIP_LEFT_RIGHT)], path, fps=10, scale=2)
             with Image.open(path) as g:
@@ -166,19 +172,19 @@ class UnitTests(unittest.TestCase):
 
     @staticmethod
     def _cfg():
-        return config.parse({"checkpoint": "x", "frame_size": 128, "char_height": 64, "palette": 16,
+        return config.parse({"engine": "video", "checkpoint": "x", "frame_size": 128, "char_height": 64, "palette": 16,
                              "jobs": [{"name": "a", "prompt": "p",
                                        "actions": [{"name": "i", "prompt": "i"}]}]})
 
 
 class EndToEndTests(unittest.TestCase):
     def test_batch_resume_and_error_isolation(self):
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
             chibi, _ = pipelines.prepare_character(fake_character(7), UnitTests._cfg())
             chibi.save(d / "chibi.png")
             jobs = {
-                "comfy_url": fake.url,
+                "comfy_url": fake.url, "engine": "video",
                 "checkpoint": "pixel_test.safetensors",
                 "seed": -1, "frame_size": 128, "char_height": 64, "palette": 32, "fps": 10,
                 "jobs": [
@@ -235,11 +241,11 @@ class EndToEndTests(unittest.TestCase):
 
     def test_stale_output_is_redone_and_changes_are_detected(self):
         # Lỗi thật: chạy lại trong cùng session -> output cũ (code cũ) bị "bỏ qua" hết
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d, out = Path(d), Path(d) / "o"
             acts = [{"name": "idle", "prompt": "idle", "frames": 4},
                     {"name": "walk", "prompt": "walk", "frames": 4}]
-            jobs = {"comfy_url": fake.url, "checkpoint": "auto", "debug": False,
+            jobs = {"comfy_url": fake.url, "checkpoint": "auto", "debug": False, "engine": "video",
                     "jobs": [{"name": "r", "prompt": "samurai", "actions": acts}]}
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
             run = lambda: run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(out)])
@@ -268,12 +274,12 @@ class EndToEndTests(unittest.TestCase):
             _close_log_handlers()
 
     def test_two_gpus_split_actions(self):
-        with FakeComfy() as gpu0, FakeComfy() as gpu1, tempfile.TemporaryDirectory() as d:
+        with FakeComfy() as gpu0, FakeComfy() as gpu1, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
             run_batch.STAGGER_S = 0.3
             acts = [{"name": f"a{i}", "prompt": "idle", "frames": 4} for i in range(6)]
             acts[2]["prompt"] = "FAIL_ME"
-            jobs = {"checkpoint": "pixel_test.safetensors", "debug": False,
+            jobs = {"checkpoint": "pixel_test.safetensors", "debug": False, "engine": "video",
                     "jobs": [{"name": "r", "prompt": "samurai", "actions": acts}]}
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
             urls = f"{gpu0.url},http://127.0.0.1:9,{gpu1.url}"  # URL giữa không chạy -> bị bỏ qua
@@ -290,9 +296,9 @@ class EndToEndTests(unittest.TestCase):
             _close_log_handlers()
 
     def test_wrong_background_retries_then_cuts_cleanly(self):
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
-            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 10,
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 10, "engine": "video",
                     "jobs": [{"name": "dark", "prompt": "BLACKBG dark samurai",
                               "actions": [{"name": "idle", "prompt": "idle", "frames": 4}]}]}
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
@@ -309,10 +315,47 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(g.n_frames, 49)
             _close_log_handlers()
 
-    def test_character_cut_at_edge_is_regenerated(self):
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+    def test_user_sprite_by_filename_keeps_native_pixels(self):
+        # Trường hợp có sẵn sprite mẫu: upload ảnh (phóng x4), jobs.json chỉ ghi tên file
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
-            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 20,
+            cfg48 = config.parse({"engine": "video", "checkpoint": "x", "char_height": 48, "palette": 40, "jobs": [
+                {"name": "a", "prompt": "p", "actions": [{"name": "i", "prompt": "i"}]}]})
+            native, _ = pipelines.prepare_character(fake_character(11), cfg48)
+            (d / "kaggle_input" / "datasets" / "me" / "sprites").mkdir(parents=True)
+            sprite_path = d / "kaggle_input" / "datasets" / "me" / "sprites" / "hero.png"
+            pixel.upscale(native, 4).save(sprite_path)
+            old_roots, run_batch.SEARCH_ROOTS = run_batch.SEARCH_ROOTS, [d / "kaggle_input"]
+            try:
+                jobs = {"comfy_url": fake.url, "frame_size": 160, "debug": False, "engine": "video",
+                        "jobs": [{"name": "hero", "mode": "image", "character_image": "hero.png",
+                                  "prompt": "a knight with a red cape",
+                                  "actions": [{"name": "idle", "prompt": "breathing", "frames": 4}]}]}
+                (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+                run = lambda: run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")])
+                self.assertEqual(run(), 0)
+                char = Image.open(d / "o/hero/character.png")
+                self.assertEqual(char.size, native.size)  # x4 -> đúng pixel gốc, không ép về 80px
+                colors = lambda im: {tuple(p) for p in np.asarray(im)[np.asarray(im)[:, :, 3] > 0][:, :3]}
+                self.assertEqual(colors(char), colors(native))  # giữ nguyên màu của người dùng
+                self.assertIn("a knight with a red cape", json.dumps(fake.prompts[-1]))
+                self.assertFalse(any("CheckpointLoaderSimple" in json.dumps(g) for g in fake.prompts))
+
+                n = len(fake.prompts)
+                self.assertEqual(run(), 0)  # không đổi gì -> không chạy lại
+                self.assertEqual(len(fake.prompts), n)
+                flipped = pixel.upscale(native.transpose(Image.FLIP_LEFT_RIGHT), 4)
+                flipped.save(sprite_path)  # upload bản sửa, cùng tên file
+                self.assertEqual(run(), 0)
+                self.assertEqual(len(fake.prompts), n + 1)  # nhận ra ảnh mới -> làm lại action
+            finally:
+                run_batch.SEARCH_ROOTS = old_roots
+                _close_log_handlers()
+
+    def test_character_cut_at_edge_is_regenerated(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 20, "engine": "video",
                     "debug": False, "jobs": [{"name": "c", "prompt": "CUTFEET ninja",
                                               "actions": [{"name": "i", "prompt": "i", "frames": 2}]}]}
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
@@ -325,7 +368,7 @@ class EndToEndTests(unittest.TestCase):
             _close_log_handlers()
 
     def test_example_jobs_parse_and_auto_checkpoint(self):
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             for name in ("jobs.example.json", "jobs.bench.json"):
                 cfg = config.load(ROOT / "kaggle" / name)
                 self.assertEqual(cfg.checkpoint, "auto")
@@ -334,11 +377,117 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(cfg.checkpoint_file, "pixel_test.safetensors")
 
     def test_preflight_reports_missing_model(self):
-        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
-            cfg = config.parse({"checkpoint": "khong_co.safetensors", "jobs": [
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            cfg = config.parse({"checkpoint": "khong_co.safetensors", "engine": "video", "jobs": [
                 {"name": "a", "prompt": "p", "actions": [{"name": "i", "prompt": "i"}]}]})
             problems = run_batch.preflight(comfy.ComfyClient(fake.url), cfg, Path(d), Path(d))
             self.assertTrue(any("khong_co.safetensors" in p for p in problems))
+
+
+class PoseEngineTests(unittest.TestCase):
+    def test_presets_are_grounded_and_inside_canvas(self):
+        for name, preset in poses.PRESETS.items():
+            for n in (1, 6, 8):
+                keys = poses.sequence(name, n)
+                self.assertEqual(len(keys), n)
+                for key in keys:
+                    pts = [p for p in poses.skeleton(key) if p is not None]
+                    self.assertAlmostEqual(min(p[1] for p in pts), key["air"], places=6, msg=name)
+                    for x, y in (q for q in poses.to_pixels(poses.skeleton(key), 512) if q):
+                        self.assertTrue(8 <= x <= 504 and 8 <= y <= 504, f"{name}: ({x:.0f},{y:.0f})")
+
+    def test_render_uses_controlnet_openpose_colors(self):
+        img = np.asarray(poses.render(poses.NEUTRAL, 512)).reshape(-1, 3)
+        colors = {tuple(c) for c in img.tolist()}
+        self.assertIn((153, 0, 0), colors)        # cổ -> vai phải: (255,0,0) x 0.6
+        self.assertIn((0, 153, 51), colors)       # cổ -> hông phải: (0,255,85) x 0.6
+        self.assertGreater((img.sum(1) > 0).mean(), 0.003)
+
+    def test_loop_has_no_duplicate_end_frame(self):
+        walk = poses.sequence("walk", 8)
+        self.assertNotEqual(walk[0], walk[-1])
+        jump = poses.sequence("jump", 6)
+        self.assertEqual(jump[0], poses.PRESETS["jump"]["keys"][0])
+        self.assertEqual(jump[-1], poses.PRESETS["jump"]["keys"][-1])
+
+    def test_config_pose_validation(self):
+        base = {"checkpoint": "auto", "jobs": [{"name": "a", "prompt": "p", "actions": []}]}
+
+        def parse(actions, **extra):
+            raw = json.loads(json.dumps(base)); raw.update(extra)
+            raw["jobs"][0]["actions"] = actions
+            return config.parse(raw)
+
+        with self.assertRaisesRegex(config.ConfigError, "attack"):
+            parse([{"name": "slash2", "prompt": "x"}])  # tên lạ -> gợi ý danh sách tư thế
+        cfg = parse([{"name": "slash2", "prompt": "x", "pose": "attack"},
+                     {"name": "jump", "prompt": "x"}, {"name": "w", "prompt": "x", "engine": "video"}])
+        acts = cfg.jobs[0].actions
+        self.assertEqual((acts[0].engine, acts[0].pose, acts[0].loop), ("pose", "attack", False))
+        self.assertEqual((acts[2].engine, acts[2].pose), ("video", None))
+        with self.assertRaisesRegex(config.ConfigError, "engine"):
+            parse([{"name": "idle", "prompt": "x"}], engine="gif")
+        with self.assertRaisesRegex(config.ConfigError, "checkpoint"):  # ảnh mẫu + pose vẫn cần SD
+            config.parse({"jobs": [{"name": "a", "mode": "image", "character_image": "a.png",
+                                    "actions": [{"name": "idle", "prompt": "x"}]}]})
+
+    def test_fill_defaults(self):
+        graph = {"1": {"class_type": "IPAdapter", "inputs": {"weight_type": "standard", "weight": 0.8}},
+                 "2": {"class_type": "CheckpointLoaderSimple", "inputs": {"ckpt_name": "mine.safetensors"}}}
+        info = {"IPAdapter": {"input": {"required": {
+                    "weight": ["FLOAT", {"default": 1.0}],
+                    "weight_type": [["linear", "ease in"]],
+                    "start_at": ["FLOAT", {"default": 0.0}],
+                    "embeds_scaling": ["COMBO", {"options": ["V only", "K+V"]}]}}},
+                "CheckpointLoaderSimple": {"input": {"required": {"ckpt_name": [["other.safetensors"]]}}}}
+        workflows.fill_defaults(graph, info)
+        self.assertEqual(graph["1"]["inputs"]["weight"], 0.8)            # giá trị có sẵn giữ nguyên
+        self.assertEqual(graph["1"]["inputs"]["weight_type"], "linear")  # enum đổi tên -> sửa
+        self.assertEqual(graph["1"]["inputs"]["start_at"], 0.0)          # thiếu -> mặc định
+        self.assertEqual(graph["1"]["inputs"]["embeds_scaling"], "V only")
+        self.assertEqual(graph["2"]["inputs"]["ckpt_name"], "mine.safetensors")  # tên file: không đụng
+
+    def _run(self, fake, d, actions, **extra):
+        jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 5,
+                "jobs": [{"name": "ronin", "prompt": "dark samurai", "actions": actions}], **extra}
+        (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+        return run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")])
+
+    def test_pose_engine_end_to_end(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            actions = [{"name": "idle", "prompt": "breathing", "frames": 8},
+                       {"name": "attack", "prompt": "slashing", "frames": 6, "columns": 3},
+                       {"name": "slash2", "prompt": "second slash", "frames": 4, "pose": "attack"},
+                       {"name": "jump", "prompt": "jumping", "frames": 6}]
+            self.assertEqual(self._run(fake, d, actions), 0)
+            kinds = [{n["class_type"] for n in g.values()} for g in fake.prompts]
+            self.assertTrue(all("ControlNetApplyAdvanced" in k for k in kinds))
+            self.assertNotIn("IPAdapter", kinds[0])                      # nhân vật: chỉ khung xương
+            self.assertTrue(all("IPAdapter" in k for k in kinds[1:]))     # frame: + giữ ngoại hình
+            self.assertEqual(len(fake.prompts), 1 + 8 + 6 + 4 + 6)
+            anchors = set()
+            for act, n, cols in (("idle", 8, 8), ("attack", 6, 3), ("slash2", 4, 4), ("jump", 6, 6)):
+                m = json.loads((d / "o/ronin" / act / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual((m["frameCount"], m["columns"], m["frameWidth"]), (n, cols, 128))
+                self.assertEqual(m["meta"]["engine"], "pose")
+                anchors.add(json.dumps(m["anchor"]))
+                self.assertTrue((d / "o/ronin" / act / "debug" / "poses.png").exists())
+            self.assertEqual(len(anchors), 1)  # mọi action cùng điểm neo chân
+            self.assertFalse(json.loads((d / "o/ronin/jump/manifest.json").read_text())["loop"])
+            # nhảy: frame giữa phải cao hơn frame đầu (chuyển động thật được giữ)
+            sheet_img = Image.open(d / "o/ronin/jump/spritesheet.png")
+            tops = [sheet_img.crop((i * 128, 0, i * 128 + 128, 128)).getbbox()[1] for i in range(6)]
+            self.assertLess(min(tops[2:4]), tops[0] - 10)
+            _close_log_handlers()
+
+    def test_pose_engine_without_ipadapter_still_runs(self):
+        with FakeComfy(ipadapter=False) as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            self.assertEqual(self._run(fake, d, [{"name": "idle", "prompt": "x", "frames": 2}]), 0)
+            self.assertFalse(any("IPAdapter" in json.dumps(g) for g in fake.prompts))
+            self.assertIn("Tắt IP-Adapter", (d / "o/run_log.txt").read_text(encoding="utf-8"))
+            _close_log_handlers()
 
 
 if __name__ == "__main__":

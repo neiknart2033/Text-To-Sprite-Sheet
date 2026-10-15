@@ -130,6 +130,30 @@ def prepare_character(rgba: Image.Image, char_height: int, palette_size: int,
     return (rgba.crop(box) if box else rgba), palette
 
 
+def detect_block_size(rgba: Image.Image, max_k: int = 32) -> int:
+    """Hệ số phóng của ảnh pixel art đã phóng to (mỗi pixel gốc = k x k pixel ảnh).
+
+    Lấy ước chung lớn nhất của độ dài các dải màu giống nhau theo hàng và cột (bỏ dải đầu/
+    cuối mỗi hàng vì có thể bị mép ảnh cắt). Ảnh gốc, ảnh có viền mờ hoặc nén JPEG -> 1.
+    """
+    a = np.asarray(rgba.convert("RGBA")).astype(np.int64)
+    packed = (a[..., 0] << 24) | (a[..., 1] << 16) | (a[..., 2] << 8) | a[..., 3]
+    runs = []
+    for grid in (packed, packed.T):
+        for line in grid:
+            change = np.flatnonzero(np.diff(line)) + 1
+            if len(change) >= 2:
+                runs.append(np.diff(change))
+    if not runs:
+        return 1
+    k = 0
+    for v in np.unique(np.concatenate(runs)):
+        k = math.gcd(k, int(v))
+        if k == 1:
+            break
+    return k if 2 <= k <= max_k else 1
+
+
 def touches_edge(rgba: Image.Image, margin: int = 2) -> bool:
     """Nhân vật chạm mép ảnh (bị cắt chân/đầu) - sau khi đã bỏ đốm lạc."""
     box = bbox(remove_specks(binarize_alpha(rgba), 3, rel=0.005))
@@ -189,7 +213,13 @@ def video_frame_to_native(frame_rgba: Image.Image, layout: VideoLayout,
     """Frame WAN (đã tách nền) -> pixel gốc, alpha nhị phân, đúng palette nhân vật."""
     nw, nh = layout.native_size
     frame_rgba = frame_rgba.crop((0, 0, nw * layout.k, nh * layout.k))
-    small = resize_premultiplied(frame_rgba, (nw, nh))
+    return frame_to_native(frame_rgba, (nw, nh), palette, speck_area)
+
+
+def frame_to_native(rgba: Image.Image, size: tuple[int, int], palette: np.ndarray,
+                    speck_area: int = 3) -> Image.Image:
+    """Frame đã tách nền -> thu về pixel gốc, alpha nhị phân, đúng palette nhân vật."""
+    small = resize_premultiplied(rgba, size)
     # Mảnh vụn < 0.6% thân hình (hiệu ứng, bóng, nhiễu tách nền) bị bỏ
     small = remove_specks(binarize_alpha(small), speck_area, rel=0.006)
     return apply_palette(small, palette)

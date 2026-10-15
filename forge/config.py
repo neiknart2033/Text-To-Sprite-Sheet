@@ -6,6 +6,18 @@ import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .poses import PRESETS as POSE_PRESETS
+
+ENGINES = ("pose", "video")
+POSE_DEFAULTS = {
+    "controlnet": "control_v11p_sd15_openpose_fp16.safetensors",
+    "strength": 1.0,           # độ bám khung xương của ControlNet
+    "ipadapter": True,         # giữ ngoại hình theo ảnh nhân vật (cần ComfyUI_IPAdapter_plus)
+    "ipadapter_preset": "PLUS (high strength)",
+    "ipadapter_weight": 0.8,
+    "size": 512,               # cạnh ảnh SD sinh mỗi frame
+}
+
 WAN_DEFAULTS = {
     "unet": "wan2.2_ti2v_5B_fp16.safetensors",
     "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
@@ -46,6 +58,8 @@ class Action:
     align: str = "fixed"
     loop: bool = True
     seed: int | None = None
+    engine: str = "pose"       # "pose" (khung xương + SD1.5) | "video" (WAN 2.2)
+    pose: str | None = None    # preset trong forge/poses.py (engine pose)
 
 
 @dataclass
@@ -76,6 +90,10 @@ class Settings:
     bg_color: str = "auto"
     preview_scale: int = 3
     debug: bool = True
+    char_height_explicit: bool = False  # jobs.json có khai báo char_height không
+    palette_explicit: bool = False      # jobs.json có khai báo palette không
+    engine: str = "pose"
+    pose: dict = field(default_factory=lambda: dict(POSE_DEFAULTS))
     wan: dict = field(default_factory=lambda: dict(WAN_DEFAULTS))
     jobs: list[Job] = field(default_factory=list)
 
@@ -110,7 +128,13 @@ def parse(raw: dict) -> Settings:
     if raw.get("debug") is not None:
         s.debug = bool(raw["debug"])
     s.char_height = _int(raw.get("char_height", s.frame_size // 2), "char_height")
+    s.char_height_explicit = raw.get("char_height") is not None
+    s.palette_explicit = raw.get("palette") is not None
     s.wan = {**WAN_DEFAULTS, **(raw.get("wan") or {})}
+    s.pose = {**POSE_DEFAULTS, **(raw.get("pose") or {})}
+    s.engine = str(raw.get("engine", s.engine))
+    if s.engine not in ENGINES:
+        raise ConfigError(f"engine phải là một trong {ENGINES}, đang là {s.engine!r}")
 
     if s.view not in VIEWS:
         raise ConfigError(f"view phải là một trong {list(VIEWS)}, đang là {s.view!r}")
@@ -133,8 +157,11 @@ def parse(raw: dict) -> Settings:
             raise ConfigError(f"Trùng tên job: {parsed.name}")
         seen.add(parsed.name)
         s.jobs.append(parsed)
-    if any(job.mode == "prompt" for job in s.jobs) and not s.checkpoint:
-        raise ConfigError("Có job mode \"prompt\" nên cần khai báo \"checkpoint\" (SD1.5 pixel art)")
+    needs_sd = any(job.mode == "prompt" or any(a.engine == "pose" for a in job.actions)
+                   for job in s.jobs)
+    if needs_sd and not s.checkpoint:
+        raise ConfigError("Cần khai báo \"checkpoint\" (SD1.5 pixel art, hoặc \"auto\"): có job "
+                          "mode \"prompt\" hoặc action dùng engine \"pose\" (SD vẽ từng frame)")
     return s
 
 
@@ -170,12 +197,25 @@ def _job(raw: dict, j: int, s: Settings) -> Job:
         align = act.get("align", "fixed")
         if align not in ALIGN_MODES:
             raise ConfigError(f"{aw} ({aname}): align phải là một trong {ALIGN_MODES}")
+        engine = str(act.get("engine", s.engine))
+        if engine not in ENGINES:
+            raise ConfigError(f"{aw} ({aname}): engine phải là một trong {ENGINES}")
+        pose = None
+        if engine == "pose":
+            pose = str(act.get("pose", aname))
+            if pose not in POSE_PRESETS:
+                raise ConfigError(
+                    f"{aw} ({aname}): chưa có tư thế mẫu \"{pose}\". Có sẵn: "
+                    f"{', '.join(POSE_PRESETS)}. Action tên khác thì thêm \"pose\": \"<tên có sẵn>\" "
+                    f"(VD \"slash2\" dùng \"pose\": \"attack\"), hoặc \"engine\": \"video\".")
+        default_loop = POSE_PRESETS[pose]["loop"] if pose else True
         actions.append(Action(
             name=aname, prompt=str(act["prompt"]), frames=frames,
             columns=_int(act.get("columns", frames), f"{aw}.columns"),
             duration=float(act.get("duration", s.wan["duration"])),
-            align=align, loop=bool(act.get("loop", True)),
+            align=align, loop=bool(act.get("loop", default_loop)),
             seed=_int(act["seed"], f"{aw}.seed") if act.get("seed") is not None else None,
+            engine=engine, pose=pose,
         ))
     return Job(name=name, mode=mode, prompt=raw.get("prompt"),
                character_image=raw.get("character_image"), actions=actions,
