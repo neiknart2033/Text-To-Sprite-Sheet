@@ -40,8 +40,14 @@ mục bên trong dataset không quan trọng. Chỉ để checkpoint trong datas
 ### 1.3 Đưa code SpriteForge lên Kaggle (chọn 1 cách)
 - **Cách A (không cần GitHub):** nén cả thư mục dự án (có `forge/` và `kaggle/`)
   thành zip → New Dataset → tên `spriteforge-code`, Private.
-- **Cách B:** đẩy dự án lên GitHub, rồi điền `SPRITEFORGE_REPO` ở cell 1 của notebook.
-  Repo phải public, hoặc bạn tự thêm token.
+- **Cách B (GitHub):** đẩy dự án lên GitHub, rồi ở cell 1 của notebook điền
+  `SPRITEFORGE_REPO` và `SPRITEFORGE_BRANCH` (nhánh chứa code).
+  - Repo **public**: không cần làm gì thêm.
+  - Repo **private**: tạo token trên GitHub → *Settings → Developer settings →
+    Fine-grained tokens* → chỉ chọn repo này, quyền **Contents: Read-only**. Trong
+    notebook Kaggle: *Add-ons → Secrets* → *Add Secret*, label `GITHUB_TOKEN`, dán
+    token, rồi bật (tick) secret đó cho notebook. Token không bị in ra output.
+  - Sửa code rồi push: chạy lại cell 2 là notebook tự `git pull` bản mới.
 
 ### 1.4 Tạo notebook
 1. kaggle.com → **Code** → **New Notebook** → *File → Import Notebook* → chọn
