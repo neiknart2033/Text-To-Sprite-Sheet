@@ -240,6 +240,10 @@ def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: 
         return {"status": "error", "error": f"{type(e).__name__}: {e}", "seconds": round(secs, 1)}
 
 
+RESTART_HINT = ("ComfyUI đang chạy là bản khởi động TRƯỚC khi cài: chạy lại cell 3 để khởi "
+                "động lại (ComfyUI chỉ đọc thư mục model và custom node lúc khởi động)")
+
+
 def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Path) -> list[str]:
     """Kiểm tra node, model, ảnh đầu vào TRƯỚC khi tốn giờ GPU."""
     problems = []
@@ -263,28 +267,31 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
         if cfg.pose.get("ipadapter"):
             reason = None
             if client.missing_nodes(workflows.IPADAPTER_NODES):
-                reason = "chưa cài custom node ComfyUI_IPAdapter_plus"
-            elif not any("ip-adapter-plus_sd15" in m for m in client.list_models("ipadapter")):
-                reason = "thiếu model ipadapter/ip-adapter-plus_sd15.safetensors"
-            elif not any("CLIP-ViT-H-14" in m for m in client.list_models("clip_vision")):
-                reason = "thiếu model clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
+                reason = "ComfyUI không có node ComfyUI_IPAdapter_plus"
+            elif not any("ip-adapter-plus_sd15" in m for m in client.list_models("ipadapter") or []):
+                reason = "ComfyUI không thấy model ipadapter/ip-adapter-plus_sd15.safetensors"
+            elif not any("CLIP-ViT-H-14" in m for m in client.list_models("clip_vision") or []):
+                reason = "ComfyUI không thấy model clip_vision/CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"
             if reason:
                 cfg.pose["ipadapter"] = False
-                log.warning("Tắt IP-Adapter (%s): nhân vật sẽ kém giống nhau giữa các frame.", reason)
+                log.warning("Tắt IP-Adapter (%s): nhân vật sẽ kém giống nhau giữa các frame. Nếu "
+                            "cell 2 đã cài/tải đủ thì %s", reason, RESTART_HINT)
     if need_sd and cfg.checkpoint == "auto":
         checkpoints = client.list_models("checkpoints")
         if checkpoints:
             cfg.checkpoint_file = checkpoints[0]
             log.info("checkpoint \"auto\" -> %s", cfg.checkpoint_file)
         else:
-            problems.append("checkpoint SD1.5 nào đó trong checkpoints/ (Dataset chưa có file .safetensors)")
+            problems.append("checkpoint SD1.5 nào đó trong checkpoints/ (Dataset chưa có file "
+                            ".safetensors, hoặc " + RESTART_HINT + ")")
     elif need_sd:
         wanted.append(("checkpoints", cfg.checkpoint))
     for folder, name in wanted:
         available = client.list_models(folder)
-        if available and name not in available:
+        if available is not None and name not in available:
             problems.append(f"model '{name}' trong {folder}/ (ComfyUI đang thấy: "
-                            f"{', '.join(available[:8]) or 'không có gì'})")
+                            f"{', '.join(available[:8]) or 'không có gì'}). Nếu cell 2 đã tải "
+                            f"model này thì {RESTART_HINT}")
 
     for job in cfg.jobs:
         if job.mode == "image" and _resolve_path(job.character_image, jobs_dir) is None:

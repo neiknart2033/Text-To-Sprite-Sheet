@@ -77,11 +77,12 @@ class ComfyClient:
         info = self.object_info()
         return [c for c in class_types if c not in info]
 
-    def list_models(self, folder: str) -> list[str]:
+    def list_models(self, folder: str) -> list[str] | None:
+        """File model ComfyUI đang thấy trong thư mục; None nếu ComfyUI không biết thư mục đó."""
         try:
             return list(self._get_json(f"/models/{folder}"))
         except ComfyError:
-            return []
+            return None
 
     def free(self) -> None:
         """Gỡ model khỏi VRAM/RAM (giữa lượt SD1.5 và lượt WAN)."""

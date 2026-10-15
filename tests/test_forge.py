@@ -481,6 +481,23 @@ class PoseEngineTests(unittest.TestCase):
             self.assertLess(min(tops[2:4]), tops[0] - 10)
             _close_log_handlers()
 
+    def test_preflight_catches_empty_model_folder(self):
+        # Lỗi thật: ComfyUI cũ chưa đọc thư mục controlnet -> "not in []" lúc đã chạy
+        from tests import fake_comfy
+        saved = fake_comfy.MODELS["controlnet"]
+        fake_comfy.MODELS["controlnet"] = []
+        try:
+            with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+                d = Path(d)
+                self.assertEqual(self._run(fake, d, [{"name": "idle", "prompt": "x", "frames": 2}]), 2)
+                self.assertEqual(fake.prompts, [])  # dừng trước khi tốn GPU
+                log_text = (d / "o/run_log.txt").read_text(encoding="utf-8")
+                self.assertIn("control_v11p_sd15_openpose_fp16", log_text)
+                self.assertIn("cell 3", log_text)
+                _close_log_handlers()
+        finally:
+            fake_comfy.MODELS["controlnet"] = saved
+
     def test_pose_engine_without_ipadapter_still_runs(self):
         with FakeComfy(ipadapter=False) as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
