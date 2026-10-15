@@ -1,0 +1,36 @@
+{
+  "comfy_url": "http://127.0.0.1:8188",
+  "checkpoint": "auto",
+  "seed": -1,
+  "steps": 30,
+  "cfg_scale": 7,
+  "frame_size": 128,
+  "char_height": 64,
+  "palette": 32,
+  "fps": 10,
+  "view": "side",
+  "bg_color": "auto",
+  "preview_scale": 3,
+  "wan": {
+    "steps": 20,
+    "duration": 2.0
+  },
+  "jobs": [
+    {
+      "name": "hac_ronin",
+      "mode": "prompt",
+      "prompt": "dark samurai in black-indigo armor, oni mask with glowing red eyes, tattered black cloak, two katanas at the waist",
+      "character_image": null,
+      "actions": [
+        {"name": "idle",   "prompt": "standing still in a ready stance, calm breathing, cloak moving slightly", "frames": 8},
+        {"name": "walk",   "prompt": "walking in place, steady walk cycle, legs and arms swinging", "frames": 8, "align": "track"},
+        {"name": "run",    "prompt": "running in place, fast run cycle, leaning forward", "frames": 8, "align": "track"},
+        {"name": "attack", "prompt": "draws a katana and slashes horizontally, then returns to stance", "frames": 8},
+        {"name": "heavy",  "prompt": "raises the katana overhead and strikes down hard", "frames": 8},
+        {"name": "hurt",   "prompt": "recoils backward from a hit, then recovers", "frames": 6, "loop": false},
+        {"name": "jump",   "prompt": "crouches, jumps straight up, then lands", "frames": 6, "loop": false},
+        {"name": "death",  "prompt": "staggers, drops to the knees and collapses to the ground", "frames": 8, "loop": false, "duration": 3.0}
+      ]
+    }
+  ]
+}

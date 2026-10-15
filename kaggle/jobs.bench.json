@@ -1,0 +1,16 @@
+{
+  "checkpoint": "auto",
+  "seed": 42,
+  "frame_size": 128,
+  "char_height": 64,
+  "jobs": [
+    {
+      "name": "bench",
+      "mode": "prompt",
+      "prompt": "dark samurai in black armor, red oni mask",
+      "actions": [
+        {"name": "idle", "prompt": "standing still in a ready stance, calm breathing", "frames": 8}
+      ]
+    }
+  ]
+}

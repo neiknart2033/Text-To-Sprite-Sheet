@@ -1,0 +1,5 @@
+# Thư viện cho forge/ và run_batch.py (Kaggle đã có sẵn cả ba).
+# ComfyUI cài riêng theo ComfyUI/requirements.txt (xem notebook).
+numpy>=1.24
+scipy>=1.10
+Pillow>=10.0
