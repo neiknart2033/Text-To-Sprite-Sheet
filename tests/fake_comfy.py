@@ -30,11 +30,13 @@ MODELS = {
 }
 
 
-def fake_character(seed: int) -> Image.Image:
+def fake_character(seed: int, black_bg: bool = False) -> Image.Image:
+    """black_bg=True mô phỏng lỗi thật: SD vẽ nền đen tuyền cho nhân vật tối màu."""
     rng = np.random.default_rng(seed)
     a = np.zeros((512, 512, 3), np.int16)
-    a[:] = (40, 190, 80)
-    a += rng.integers(-6, 7, a.shape, dtype=np.int16)  # nền không phẳng tuyệt đối
+    if not black_bg:
+        a[:] = (40, 190, 80)
+        a += rng.integers(-6, 7, a.shape, dtype=np.int16)  # nền không phẳng tuyệt đối
 
     def block(x0, y0, x1, y1, color):
         a[y0 * 8:y1 * 8, x0 * 8:x1 * 8] = color
@@ -111,7 +113,8 @@ class FakeComfy:
             images, out_node = fake_video(start, node["inputs"]["length"], seed), workflows.WAN_OUTPUT
         else:
             seed = graph["3"]["inputs"]["seed"]
-            images, out_node = [fake_character(seed)], workflows.SD15_OUTPUT
+            images = [fake_character(seed, black_bg="BLACKBG" in texts)]
+            out_node = workflows.SD15_OUTPUT
         infos = []
         for im in images:
             name = f"{uuid.uuid4().hex}.png"

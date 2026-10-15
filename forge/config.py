@@ -72,6 +72,7 @@ class Settings:
     view: str = "side"
     bg_color: str = "auto"
     preview_scale: int = 3
+    debug: bool = True
     wan: dict = field(default_factory=lambda: dict(WAN_DEFAULTS))
     jobs: list[Job] = field(default_factory=list)
 
@@ -103,6 +104,8 @@ def parse(raw: dict) -> Settings:
             setattr(s, key, _int(raw[key], key))
     if raw.get("cfg_scale") is not None:
         s.cfg_scale = float(raw["cfg_scale"])
+    if raw.get("debug") is not None:
+        s.debug = bool(raw["debug"])
     s.char_height = _int(raw.get("char_height", s.frame_size // 2), "char_height")
     s.wan = {**WAN_DEFAULTS, **(raw.get("wan") or {})}
 

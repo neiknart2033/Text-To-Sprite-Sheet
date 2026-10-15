@@ -66,7 +66,9 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 **Chạy batch:**
 1. Sửa nội dung `jobs.json` ở **cell 5** (xem mục 3).
 2. Chọn một trong hai cách:
-   - **Tương tác:** *Run All*, giữ tab mở. Khi xong, tải `output.zip` ở panel **Output** bên phải.
+   - **Tương tác:** *Run All*, giữ tab mở. Khi xong, bấm link `output.zip` mà cell 7 in ra.
+     Kaggle không cho tải cả thư mục, chỉ tải từng file, nên kết quả được gom vào 1 file zip.
+     Cách khác: panel phải → **Output** → bấm ⋮ cạnh `output.zip` → *Download* (bấm biểu tượng làm mới nếu chưa thấy file).
    - **Chạy nền (không cần canh):** *Save Version* → **Save & Run All (Commit)**.
      Kaggle chạy tối đa 12 giờ, kể cả khi bạn tắt máy. Khi xong, mở bản version
      đó → tab **Output** → tải `output.zip`.
@@ -124,6 +126,7 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 | `view` | `"side"` | `"side"` (nhìn ngang, quay phải) hoặc `"front"` |
 | `bg_color` | `"auto"` | Màu nền dùng để tách. `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
+| `debug` | `true` | Lưu `debug/input.png` (ảnh đưa vào WAN) và `debug/clip.gif` (cả clip WAN trả về) cho mỗi action, để soi lỗi |
 | `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (448), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
@@ -159,7 +162,8 @@ output/
     └── idle/
         ├── spritesheet.png      frame_size x frame_size mỗi ô, nền trong suốt
         ├── manifest.json        kích thước, số cột/hàng, fps, anchor, toạ độ từng frame, seed...
-        └── preview.gif
+        ├── preview.gif
+        └── debug/               (khi "debug": true) input.png + clip.gif gốc của WAN
 ```
 
 `manifest.json` có `anchor` (điểm chân nhân vật trong ô) để engine game căn sprite.
@@ -187,7 +191,9 @@ output/
 | `out of memory` | Giảm `wan.width`/`wan.height` (VD 384, phải là bội của 32) hoặc `duration` |
 | Quá chậm | Giảm `wan.steps` (VD 12–15, chất lượng giảm nhẹ) hoặc `duration` |
 | `Mọi frame đều trống sau khi tách nền` | Đặt `bg_color` thành màu khác |
-| `nền ảnh SD không đồng nhất` | Xem `character_raw.png`: đổi seed, hoặc dùng `mode: "image"` |
+| `Nhân vật lần N: nền là [...], không phải green` | SD vẽ sai màu nền, tool tự gen lại (tối đa 3 lần). Hết 3 lần vẫn tách nền được bằng cách loang từ mép ảnh. Xem `character_preview.png` |
+| `Nhân vật bị thủng ...% thân` | Tách nền ăn mất chi tiết: đổi seed của job, hoặc dùng `mode: "image"` với ảnh nền trong suốt |
+| Animation méo, vỡ mảnh | Mở `debug/clip.gif`: nếu clip WAN đã méo thì sửa prompt action/đổi seed; nếu clip đẹp mà sheet vỡ thì là lỗi hậu xử lý, gửi log + clip cho người bảo trì |
 | `ComfyUI không khởi động được` | Đọc log in ra ở cell 3 (thường do pip cài lỗi) |
 | Hết 30 giờ GPU/tuần | Chờ reset hằng tuần, hoặc thuê Vast.ai/RunPod (notebook chạy được trên mọi máy Linux có GPU) |
 
@@ -201,10 +207,11 @@ output/
 | Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
 | Khởi động ComfyUI | ~1–2 phút |
 | 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
-| **1 action WAN (448², 49 frame, 20 steps)** | **chưa đo trên T4. Chạy benchmark (cell 4) trước** |
+| **1 action WAN (448², clip 2s = 49 frame, 20 steps)** | **~1 phút 24 giây** (đo trên Kaggle T4, 10/2026) |
+| **21 action** | **~30 phút** (+ ~15 phút cài đặt) |
 
-Hai dự án gốc chưa có số liệu WAN 2.2 trên T4. Lấy thời gian benchmark nhân với
-số action để biết batch có vừa một session 12 giờ không.
+Thời gian gần như tỉ lệ với `duration` × `wan.steps`. Còn dư nhiều quota, nên có
+thể tăng `wan.steps` lên 30 để thử chất lượng tốt hơn (~2 phút/action).
 
 ---
 

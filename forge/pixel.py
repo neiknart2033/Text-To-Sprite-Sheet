@@ -36,12 +36,13 @@ def bbox(rgba: Image.Image) -> tuple[int, int, int, int] | None:
     return rgba.getchannel("A").point(lambda v: 255 if v >= 128 else 0).getbbox()
 
 
-def remove_specks(rgba: Image.Image, min_area: int = 3) -> Image.Image:
-    """Xoá cụm pixel rời nhỏ hơn `min_area` (nhiễu sau khi tách nền/thu nhỏ)."""
-    if min_area <= 1:
-        return rgba
+def remove_specks(rgba: Image.Image, min_area: int = 3, rel: float = 0.0) -> Image.Image:
+    """Xoá cụm pixel rời nhỏ hơn max(min_area, rel * tổng pixel đục)."""
     a = np.asarray(rgba).copy()
     mask = a[:, :, 3] > 0
+    min_area = max(min_area, int(rel * mask.sum()))
+    if min_area <= 1:
+        return rgba
     labels, n = ndimage.label(mask, structure=_EIGHT)
     if n == 0:
         return rgba
@@ -171,8 +172,25 @@ def video_frame_to_native(frame_rgba: Image.Image, layout: VideoLayout,
     nw, nh = layout.native_size
     frame_rgba = frame_rgba.crop((0, 0, nw * layout.k, nh * layout.k))
     small = resize_premultiplied(frame_rgba, (nw, nh))
-    small = remove_specks(binarize_alpha(small), speck_area)
+    # Mảnh vụn < 0.6% thân hình (hiệu ứng, bóng, nhiễu tách nền) bị bỏ
+    small = remove_specks(binarize_alpha(small), speck_area, rel=0.006)
     return apply_palette(small, palette)
+
+
+def hole_ratio(rgba: Image.Image, max_share: float = 0.04) -> float:
+    """Tỉ lệ lỗ thủng NHỎ bên trong hình bóng (tách nền ăn mất chi tiết thân).
+
+    Không tính lỗ lớn (>= max_share thân): đó là khoảng hở thật, VD giữa hai chân.
+    """
+    mask = np.asarray(rgba.convert("RGBA"))[:, :, 3] > 0
+    filled = ndimage.binary_fill_holes(mask)
+    holes = filled & ~mask
+    labels, n = ndimage.label(holes)
+    if n == 0:
+        return 0.0
+    sizes = ndimage.sum_labels(holes, labels, np.arange(1, n + 1))
+    total = max(1, int(filled.sum()))
+    return float(sizes[sizes < max_share * total].sum()) / total
 
 
 # ------------------------------------------------------------ đặt vào ô
@@ -191,9 +209,19 @@ def place_in_cells(frames: list[Image.Image], layout: VideoLayout, frame_size: i
     mode "track": bỏ phần trôi ngang tuyến tính (nhân vật đi/chạy bị dạt dần
                   trong video) nhưng giữ dao động trong chu kỳ.
     """
-    anchor_x = frame_size // 2
-    anchor_y = frame_size - ground_margin
-    dy = round(anchor_y - layout.ground_y)
+    nw, nh = layout.native_size
+
+    def fit(offset: int, span: int) -> int:
+        # Canvas WAN (về pixel gốc) nhỏ hơn ô -> đặt TRỌN canvas trong ô, không cắt pixel
+        # nào; lớn hơn ô -> không để lề trống thừa. Cùng layout -> cùng độ lệch cho
+        # mọi action của nhân vật, nên chân khớp nhau khi game đổi animation.
+        lo, hi = sorted((0, frame_size - span))
+        return min(max(offset, lo), hi)
+
+    dy = fit(round(frame_size - ground_margin - layout.ground_y), nh)
+    dx_fixed = fit(round(frame_size // 2 - layout.center_x), nw)
+    anchor_x = round(layout.center_x + dx_fixed)
+    anchor_y = round(layout.ground_y + dy)
 
     centroids = [_centroid_x(f) for f in frames]
     known = [(i, c) for i, c in enumerate(centroids) if c is not None]
@@ -207,9 +235,10 @@ def place_in_cells(frames: list[Image.Image], layout: VideoLayout, frame_size: i
     cells, clipped = [], 0
     for i, frame in enumerate(frames):
         if mode == "track":
+            # Không ép trong ô: dời canvas để kéo nhân vật về giữa, phần ra ngoài là nền trống
             dx = round(anchor_x - (intercept + slope * i))
         else:
-            dx = round(anchor_x - layout.center_x)
+            dx = dx_fixed
         cell, lost = _paste_clipped(frame, frame_size, dx, dy)
         cells.append(cell)
         clipped += lost

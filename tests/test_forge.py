@@ -63,6 +63,18 @@ class UnitTests(unittest.TestCase):
         self.assertLessEqual(len(colors), 16)
         self.assertTrue(set(np.asarray(native)[:, :, 3].ravel()) <= {0, 255})
 
+    def test_dark_character_on_black_background_keeps_body(self):
+        # Lỗi thật trên Kaggle: nền đen -> cách cũ xoá luôn tóc/chân đen của nhân vật
+        raw = fake_character(4, black_bg=True)
+        leg = (29 * 8 + 4, 45 * 8)  # một pixel ở chân màu (25,25,25)
+        self.assertLess(matting.remove_background(raw, "auto").getpixel(leg)[3], 128)  # cách cũ: mất chân
+        self.assertEqual(matting.cutout_flat(raw).getpixel(leg)[3], 255)
+        new, _ = pipelines.prepare_character(raw, self._cfg())
+        self.assertEqual(new.height, 64)
+        self.assertLess(pixel.hole_ratio(new), 0.01)
+        self.assertFalse(matting.matches_key(raw, "green")[0])
+        self.assertTrue(matting.matches_key(fake_character(4), "green")[0])
+
     def test_place_in_cells_uniform_and_clipping(self):
         native, _ = pipelines.prepare_character(fake_character(2), self._cfg())
         canvas, layout = pixel.compose_video_input(native, 448, 448, (0, 255, 0))
@@ -73,6 +85,18 @@ class UnitTests(unittest.TestCase):
         self.assertEqual(info["clipped_px"], 0)
         cells, info = pixel.place_in_cells([frame], layout, 32, 2)
         self.assertGreater(info["clipped_px"], 0)
+
+    def test_canvas_smaller_than_cell_never_clips(self):
+        # Lỗi thật trên Kaggle: canvas gốc 112px < ô 128px nhưng vẫn cắt mất phần dưới chân
+        native, _ = pipelines.prepare_character(fake_character(3), self._cfg())
+        _, layout = pixel.compose_video_input(native, 448, 448, (0, 255, 0))
+        self.assertEqual(layout.native_size, (112, 112))
+        frame = Image.new("RGBA", layout.native_size, (0, 0, 0, 0))
+        frame.paste((200, 30, 30, 255), (0, 100, 112, 112))  # vươn sát đáy và hai mép canvas
+        cells, info = pixel.place_in_cells([frame], layout, 128, 8)
+        self.assertEqual(info["clipped_px"], 0)
+        a = info["anchor"]
+        self.assertTrue(0 < a["y"] <= 128 - 8 and abs(a["x"] - 64) <= 1)
 
     def test_gif_keeps_transparency(self):
         f = Image.new("RGBA", (16, 16), (0, 0, 0, 0))
@@ -178,6 +202,26 @@ class EndToEndTests(unittest.TestCase):
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
             self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(out)]), 0)
             _close_log_handlers()  # Windows không xoá được thư mục tạm khi file log còn mở
+
+    def test_wrong_background_retries_then_cuts_cleanly(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 10,
+                    "jobs": [{"name": "dark", "prompt": "BLACKBG dark samurai",
+                              "actions": [{"name": "idle", "prompt": "idle", "frames": 4}]}]}
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")]), 0)
+            sd = [g for g in fake.prompts if "CheckpointLoaderSimple" in {n["class_type"] for n in g.values()}]
+            self.assertEqual(len(sd), pipelines.CHAR_ATTEMPTS)  # nền sai -> gen lại đủ số lần
+            info = json.loads((d / "o/dark/character.json").read_text(encoding="utf-8"))
+            self.assertEqual([t["seed"] for t in info["attempts"]], [10, 11, 12])
+            native = Image.open(d / "o/dark/character.png")
+            self.assertEqual(native.height, 64)
+            self.assertLess(pixel.hole_ratio(native), 0.01)
+            self.assertTrue((d / "o/dark/idle/debug/input.png").exists())
+            with Image.open(d / "o/dark/idle/debug/clip.gif") as g:
+                self.assertEqual(g.n_frames, 49)
+            _close_log_handlers()
 
     def test_example_jobs_parse_and_auto_checkpoint(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:

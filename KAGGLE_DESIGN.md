@@ -49,8 +49,12 @@ Dự án theo **GPL-3.0** (vì có code GPLv3). Ảnh đầu ra không bị ràn
 jobs.json
   │
   ├─ LƯỢT 1  nhân vật (mọi job)                         forge.pipelines.generate_character / prepare_character
-  │    mode "prompt": SD1.5 txt2img 512² nền xanh ──► tách nền (matting, đo màu ở góc)
-  │    mode "image" : ảnh có sẵn (trong suốt hoặc nền một màu) ──► tách nền nếu cần
+  │    mode "prompt": SD1.5 txt2img 512², prompt có trọng số "(plain flat green background:1.4)";
+  │                   nền đo ở viền sai màu/không đều -> gen lại seed+1 (tối đa 3 lần)
+  │    mode "image" : ảnh có sẵn (trong suốt hoặc nền một màu)
+  │    ──► tách nền LOANG TỪ MÉP (matting.cutout_flat): chỉ xoá nền nối với mép ảnh + khoảng
+  │        nền bị kẹp đủ lớn; KHÔNG xoá mọi pixel cùng màu nền (lỗi thật: nền đen ăn 24% thân
+  │        nhân vật tối màu). remove_background (xoá mọi vùng cùng màu) chỉ dùng cho canvas WAN.
   │    ──► crop ──► thu về cao char_height (trung bình khối có alpha) ──► alpha nhị phân
   │    ──► rút palette (median-cut, ≤ palette màu) ──► character.png (pixel gốc)
   │    ──► POST /free (gỡ SD khỏi VRAM)
@@ -60,8 +64,11 @@ jobs.json
        (key = green/magenta/blue khác xa palette nhất) ──► upload
        ──► WAN 2.2 TI2V 5B (uni_pc, 20 steps, cfg 5, shift 8) clip 4n+1 frame @24fps
        ──► lấy N frame cách đều trên 85% đầu clip (chỉ tải về N frame đó)
-       ──► mỗi frame: tách nền key ──► thu ÷k về pixel gốc ──► alpha nhị phân ──► ép palette nhân vật ──► xoá đốm
-       ──► đặt vào ô frame_size² (cùng một độ lệch cho cả action; "track" bỏ trôi ngang)
+       ──► (debug) lưu input.png + clip.gif đầy đủ
+       ──► mỗi frame: tách nền key ──► thu ÷k về pixel gốc ──► alpha nhị phân ──► ép palette nhân vật
+           ──► xoá mảnh vụn < max(3px, 0.6% thân)
+       ──► đặt vào ô frame_size² (cùng một độ lệch cho cả action; canvas gốc nhỏ hơn ô thì
+           đặt trọn trong ô, không cắt pixel nào; "track" bỏ trôi ngang)
        ──► spritesheet.png + manifest.json + preview.gif
 ```
 
@@ -207,7 +214,8 @@ Log mỗi action: tên, thời gian, dung lượng 3 file; cảnh báo pixel b�
 | Tải WAN từ HF (khi không có trong dataset) | vài phút | ~17GB |
 | Cell 3 start ComfyUI | ~1–2 phút | model nạp ở prompt đầu |
 | Nhân vật SD1.5 512², 30 steps | ~10–30s/job | |
-| **1 action WAN 448², 49 frame, 20 steps** | **CHƯA ĐO** | 2 dự án gốc không có số đo WAN; chạy cell 4 |
+| **1 action WAN 448², 49 frame, 20 steps** | **~1m24s** | đo thật trên Kaggle T4 (10/2026), ổn định giữa các action |
+| **21 action** | **~30 phút** | ≪ 3 giờ của DoD; 30h/tuần đủ chạy hàng chục batch |
 
 VRAM: WAN 5B fp16 ~10GB + latent nhỏ (448²×49 frame ≈ 2.5k token) → dự kiến vừa
 16GB. VAE decode là đỉnh VRAM. Rủi ro: fp16 trên T4 có thể sinh NaN (frame đen),
@@ -228,7 +236,7 @@ pipeline phát hiện và báo lỗi rõ ràng. Cách thử: `--fp32-vae`.
 | 3 | Chạy lại cùng `jobs.json` → bỏ qua action `done` (resume qua `progress.json`), không gen lại nhân vật | ✅ test |
 | 4 | 1 action lỗi không làm dừng cả batch | ✅ test (tiêm lỗi `FAIL_ME`) |
 | 5 | Lỗi cấu hình/model/node phát hiện TRƯỚC khi chạy GPU | ✅ test preflight |
-| 6 | Tổng thời gian 21 action < 3 giờ trên T4 (không tính setup) | ⏳ cần benchmark: WAN trên T4 chưa có số đo |
+| 6 | Tổng thời gian 21 action < 3 giờ trên T4 (không tính setup) | ✅ ~1m24s/action → ~30 phút (đo 10/2026) |
 | 7 | `kaggle/README.md`: verify phone → GPU T4 → dataset → Internet → jobs.json → Run All/Commit → tải `output.zip` | ✅ |
 | 8 | `kaggle/jobs.example.json` đúng schema mục 6 (Hắc Ronin) | ✅ test parse |
 | 9 | Ghi nguồn và giấy phép hai dự án gốc | ✅ `THIRD_PARTY_NOTICES.md`, `LICENSE` |

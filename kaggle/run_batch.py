@@ -101,7 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 frames, layout, info = pipelines.animate_video(
                     client, cfg, native, palette, act,
-                    description=job.prompt if job.mode == "prompt" else None, seed=job.seed)
+                    description=job.prompt if job.mode == "prompt" else None, seed=job.seed,
+                    debug_dir=job_dir / act.name / "debug" if cfg.debug else None)
                 result = pipelines.finalize(frames, layout, act, cfg, job_dir / act.name,
                                             meta={"job": job.name, **info})
                 secs = time.time() - t0

@@ -24,11 +24,15 @@ from .config import VIEWS, Action, Settings
 log = logging.getLogger(__name__)
 
 # CLIP của SD1.5 chỉ đọc ~77 token: prompt ngắn, ý quan trọng đặt trước.
-CHAR_PROMPT = ("pixel art, game sprite, {description}, single character, full body, "
-               "{view}, standing pose, centered, plain flat {bg} background")
-CHAR_NEGATIVE = ("multiple characters, cropped, cut off, out of frame, blurry, 3d render, "
-                 "realistic, photo, text, watermark, signature, border, frame, scenery, "
-                 "detailed background, shadow, gradient background")
+# Nền và hướng nhìn có trọng số "(...:1.4)" (cú pháp ComfyUI): chạy thật trên
+# Kaggle, "dark samurai, black armor" lấn át "green background" -> SD vẽ nền đen.
+CHAR_PROMPT = ("pixel art, game sprite, (plain flat {bg} background:1.4), {description}, "
+               "single character, full body, ({view}:1.3), standing pose, centered")
+CHAR_NEGATIVE = ("{other_bgs}, multiple characters, cropped, cut off, out of frame, blurry, "
+                 "3d render, realistic, photo, text, watermark, signature, border, frame, "
+                 "scenery, detailed background, shadow, gradient background, {other_view}")
+OTHER_VIEW = {"side": "front view, facing the viewer", "front": "side view, profile"}
+CHAR_ATTEMPTS = 3  # số lần gen lại khi SD không vẽ đúng màu nền
 
 WAN_PROMPT = ("{action}. {character}2D pixel art game sprite animation, {view}, static camera, "
               "no camera movement, the character stays in the center of the frame, "
@@ -53,28 +57,46 @@ def resolve_seed(*candidates: int | None) -> int:
 # ------------------------------------------------------------------ bước 1
 def generate_character(client: ComfyClient, cfg: Settings, description: str,
                        seed: int | None = None) -> tuple[Image.Image, dict]:
+    """SD1.5 txt2img; nền sai màu/không đồng nhất thì gen lại với seed khác."""
     bg = cfg.bg_color if cfg.bg_color in ("green", "magenta", "blue", "white") else "green"
-    seed = resolve_seed(seed, cfg.seed)
+    other_bgs = ", ".join(f"{c} background" for c in ("black", "dark", "white", "gray") if c != bg)
     prompt = CHAR_PROMPT.format(description=description.strip().rstrip("."),
                                 view=VIEWS[cfg.view], bg=bg)
-    graph = workflows.sd15_txt2img(cfg.checkpoint, prompt, CHAR_NEGATIVE, seed,
-                                   steps=cfg.steps, cfg=cfg.cfg_scale,
-                                   sampler=cfg.sampler, scheduler=cfg.scheduler)
-    files = client.run(graph, workflows.SD15_OUTPUT, timeout_s=900)
-    raw = client.fetch(files[0]).convert("RGB")
-    return raw, {"seed": seed, "prompt": prompt}
+    negative = CHAR_NEGATIVE.format(other_bgs=other_bgs, other_view=OTHER_VIEW[cfg.view])
+    first = resolve_seed(seed, cfg.seed)
+    tries = []
+    for attempt in range(CHAR_ATTEMPTS):
+        s = first + attempt
+        graph = workflows.sd15_txt2img(cfg.checkpoint, prompt, negative, s,
+                                       steps=cfg.steps, cfg=cfg.cfg_scale,
+                                       sampler=cfg.sampler, scheduler=cfg.scheduler)
+        raw = client.fetch(client.run(graph, workflows.SD15_OUTPUT, timeout_s=900)[0]).convert("RGB")
+        ok, measured = matting.matches_key(raw, bg)
+        tries.append({"seed": s, "background": measured, "ok": ok})
+        if ok:
+            break
+        log.warning("Nhân vật lần %d (seed %d): nền là %s, không phải %s -> %s", attempt + 1, s,
+                    measured, bg, "thử seed khác" if attempt + 1 < CHAR_ATTEMPTS
+                    else "dùng ảnh cuối, tách nền bằng cách loang từ mép")
+    return raw, {"seed": s, "prompt": prompt, "negative": negative, "attempts": tries}
 
 
 def cutout(image: Image.Image) -> Image.Image:
-    """Ảnh có nền trong suốt thật thì giữ nguyên; không thì tách nền đo ở góc."""
+    """Ảnh có nền trong suốt thật thì giữ nguyên; không thì tách nền loang từ mép ảnh."""
     rgba = image.convert("RGBA")
     if (np.asarray(rgba)[:, :, 3] < 128).mean() > 0.05:
         return rgba
-    return matting.remove_background(image.convert("RGB"), "auto")
+    return matting.cutout_flat(image.convert("RGB"))
 
 
 def prepare_character(image: Image.Image, cfg: Settings) -> tuple[Image.Image, np.ndarray]:
-    return pixel.prepare_character(cutout(image), cfg.char_height, cfg.palette)
+    native, palette = pixel.prepare_character(cutout(image), cfg.char_height, cfg.palette)
+    holes = pixel.hole_ratio(native)
+    if holes > 0.04:
+        log.warning("Nhân vật bị thủng %.0f%% thân sau khi tách nền: animation sẽ lỗi. Xem "
+                    "character_preview.png; đổi seed hoặc dùng mode \"image\" với ảnh nền trong suốt.",
+                    holes * 100)
+    return native, palette
 
 
 def palette_of(native: Image.Image, max_colors: int) -> np.ndarray:
@@ -86,7 +108,8 @@ def palette_of(native: Image.Image, max_colors: int) -> np.ndarray:
 # ------------------------------------------------------------------ bước 2
 def animate_video(client: ComfyClient, cfg: Settings, native: Image.Image,
                   palette: np.ndarray, action: Action, description: str | None = None,
-                  seed: int | None = None) -> tuple[list[Image.Image], pixel.VideoLayout, dict]:
+                  seed: int | None = None, debug_dir: str | Path | None = None,
+                  ) -> tuple[list[Image.Image], pixel.VideoLayout, dict]:
     wan = cfg.wan
     key = cfg.bg_color if cfg.bg_color in ("green", "magenta", "blue") else pixel.key_color_for(palette)
     canvas, layout = pixel.compose_video_input(native, int(wan["width"]), int(wan["height"]),
@@ -109,9 +132,19 @@ def animate_video(client: ComfyClient, cfg: Settings, native: Image.Image,
         log.warning("WAN trả %d frame, ít hơn %d dự kiến", len(files), length)
         indices = workflows.frame_indices(len(files), action.frames, float(wan["useful_fraction"]))
 
+    if debug_dir:  # ảnh đưa vào WAN + toàn bộ clip WAN trả về, để soi lỗi
+        debug_dir = Path(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        canvas.save(debug_dir / "input.png")
+        clip = [client.fetch(f).convert("RGB") for f in files]
+        _save_clip(clip, debug_dir / "clip.gif")
+        raw_frames = {i: clip[i] for i in indices}
+    else:
+        raw_frames = {i: client.fetch(files[i]).convert("RGB") for i in indices}
+
     frames, empty = [], 0
     for i in indices:
-        raw = client.fetch(files[i]).convert("RGB")
+        raw = raw_frames[i]
         if float(np.asarray(raw).std()) < 2.0:
             raise ComfyError(f"Frame {i} gần như một màu (đen/trống). WAN có thể bị lỗi fp16 "
                              "trên T4; xem kaggle/README.md mục 'Xử lý sự cố'.")
@@ -126,6 +159,12 @@ def animate_video(client: ComfyClient, cfg: Settings, native: Image.Image,
         log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
     return frames, layout, {"seed": seed, "prompt": prompt, "clip_length": length,
                             "frame_indices": indices, "key_color": key, "scale_k": layout.k}
+
+
+def _save_clip(clip: list[Image.Image], path: Path) -> None:
+    small = [f.resize((f.width // 2, f.height // 2), Image.BILINEAR) for f in clip]
+    small[0].save(path, save_all=True, append_images=small[1:],
+                  duration=round(1000 / workflows.WAN_FPS), loop=0)
 
 
 # ------------------------------------------------------------------ bước 3

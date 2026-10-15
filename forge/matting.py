@@ -113,3 +113,57 @@ def remove_background(image: Image.Image, color="auto", tolerance: float = 66,
     rgb = _despill(a, tint) if despill and np.ptp(tint) > 60 else a
     out = np.dstack([np.clip(rgb, 0, 255).astype(np.uint8), (alpha * 255).astype(np.uint8)])
     return Image.fromarray(out, "RGBA")
+
+
+def border_color(a: np.ndarray) -> np.ndarray:
+    """Màu nền = trung vị của toàn bộ pixel viền ảnh."""
+    return np.median(np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]]), 0)
+
+
+def cutout_flat(image: Image.Image, tolerance: float | None = None,
+                despill: bool = True) -> Image.Image:
+    """Tách nền phẳng BẤT KỲ màu (kể cả đen/trắng) bằng cách loang từ mép ảnh.
+
+    Dùng cho ảnh nhân vật (SD sinh ra, hoặc ảnh người dùng). Khác
+    `remove_background` (xoá MỌI vùng cùng màu nền - đúng với canvas key do ta
+    tự dựng): ở đây chỉ xoá nền NỐI VỚI MÉP ảnh. Lỗi gặp thật trên Kaggle: SD vẽ
+    nền đen cho "dark samurai", cách cũ xoá luôn tóc/giáp đen -> thủng 24% thân.
+    """
+    a = np.asarray(image.convert("RGB")).astype(np.int16)
+    border = np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]])
+    bg = border_color(a)
+    if tolerance is None:  # theo độ nhiễu thật của nền, kẹp trong [8, 48]
+        noise = np.percentile(np.abs(border - bg).max(1), 95)
+        tolerance = float(np.clip(noise + 10, 8, 48))
+    candidate = np.abs(a - bg).max(2) <= tolerance
+    labels, n = ndimage.label(candidate)
+    edge = np.unique(np.concatenate([labels[0], labels[-1], labels[:, 0], labels[:, -1]]))
+    edge = edge[edge > 0]
+    foreground = ~np.isin(labels, edge)
+
+    # Khoảng nền bị kẹp (giữa tay và thân, giữa hai chân - bị vệt bóng dưới chân bịt
+    # kín): gỡ nếu đủ lớn. Nền key (xanh lá...) gần như không trùng màu nhân vật nên
+    # ngưỡng 1.5% thân; nền đen/trắng/xám dễ trùng mảng giáp/áo nên đòi 4%.
+    # (Ảnh thật trên Kaggle: khoảng đen giữa hai chân = 9% thân, mảng tối khác <= 1.3%.)
+    if n:
+        sizes = ndimage.sum_labels(candidate, labels, np.arange(1, n + 1))
+        share = 0.015 if np.ptp(bg) > 60 else 0.04
+        min_hole = max(16.0, share * float(foreground.sum()))
+        trapped = [i + 1 for i, s in enumerate(sizes) if s >= min_hole and (i + 1) not in edge]
+        foreground &= ~np.isin(labels, trapped)
+
+    rgb = _despill(a, bg) if despill and np.ptp(bg) > 60 else a
+    out = np.dstack([np.clip(rgb, 0, 255).astype(np.uint8),
+                     np.where(foreground, 255, 0).astype(np.uint8)])
+    return Image.fromarray(out, "RGBA")
+
+
+def matches_key(image: Image.Image, key: str) -> tuple[bool, list[int]]:
+    """Nền ảnh có đúng màu key yêu cầu và đồng nhất không (để quyết định gen lại)."""
+    a = np.asarray(image.convert("RGB")).astype(np.int16)
+    bg = border_color(a)
+    targets = [np.array(KEY_FILL.get(key, PRESETS.get(key, (0, 255, 0))), float)]
+    if key in PRESETS:
+        targets.append(np.array(PRESETS[key], float))
+    close = min(float(np.sqrt(((bg - t) ** 2).sum())) for t in targets) < 120
+    return close and corner_spread(image) <= 24, [int(c) for c in bg]
