@@ -76,7 +76,9 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
    - **Chạy nền (không cần canh):** *Save Version* → **Save & Run All (Commit)**.
      Kaggle chạy tối đa 12 giờ, kể cả khi bạn tắt máy. Khi xong, mở bản version
      đó → tab **Output** → tải `output.zip`.
-3. Có action lỗi? Chạy lại cell 6 (trong cùng session). Action đã xong sẽ được bỏ qua.
+3. Có action lỗi, hoặc vừa sửa `jobs.json`? Chạy lại cell 6 trong cùng session. Tool chỉ làm lại
+   những gì cần: action lỗi, action có prompt/tham số vừa sửa, và mọi thứ bị ảnh hưởng khi
+   nhân vật đổi hoặc code SpriteForge được nâng cấp. Phần còn lại được bỏ qua.
 
 > Thư mục `/kaggle/working` bị xoá khi session kết thúc. Chỉ những gì nằm trong
 > Output của bản Commit mới được giữ lại. Nhớ tải `output.zip` trước khi tắt session tương tác.
@@ -176,8 +178,8 @@ output/
 
 ## 5. Mẹo chất lượng
 
-- **Không ưng nhân vật?** Đặt `"seed"` khác cho job, xoá thư mục `output/<job>/`
-  rồi chạy lại. Hoặc chọn một `character.png` ưng ý từ lần trước và dùng `mode: "image"`.
+- **Không ưng nhân vật?** Đặt `"seed"` khác cho job rồi chạy lại cell 6. Nhân vật và mọi
+  action của job đó tự làm lại. Hoặc chọn một `character.png` ưng ý từ lần trước và dùng `mode: "image"`.
 - **Đi/chạy bị trôi khỏi khung:** viết "in place" trong prompt và đặt `"align": "track"`.
 - **Nhân vật có màu trùng nền** (VD áo xanh lá): giữ `bg_color: "auto"` hoặc đặt `"magenta"`.
 - **Nhân vật bị cắt** (log báo "pixel bị cắt"): tăng `frame_size` hoặc giảm `char_height`.

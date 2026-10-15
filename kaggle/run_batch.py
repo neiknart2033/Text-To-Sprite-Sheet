@@ -13,6 +13,8 @@ Resume: action đã "done" trong <job>/progress.json thì bỏ qua. Một action
 from __future__ import annotations
 
 import argparse
+import dataclasses
+import hashlib
 import json
 import logging
 import queue
@@ -27,7 +29,7 @@ sys.path.insert(0, str(ROOT))
 
 from PIL import Image  # noqa: E402
 
-from forge import config, matting, pipelines, pixel, workflows  # noqa: E402
+from forge import config, pipelines, pixel, workflows  # noqa: E402
 from forge.comfy import ComfyClient, ComfyError  # noqa: E402
 
 log = logging.getLogger("spriteforge")
@@ -112,12 +114,19 @@ def main(argv: list[str] | None = None) -> int:
                 counts["error"] += 1
             _save_progress(job_dir, progress)
             continue
+        native = characters[job.name][0]
         for act in job.actions:
-            if _status(progress.get(act.name)) == "done" and (job_dir / act.name / "spritesheet.png").exists():
+            entry = progress.get(act.name)
+            fingerprint = action_fingerprint(cfg, job, act, native)
+            if (_status(entry) == "done" and (job_dir / act.name / "spritesheet.png").exists()
+                    and isinstance(entry, dict) and entry.get("fingerprint") == fingerprint):
                 log.info("[%s/%s] đã xong trước đó, bỏ qua", job.name, act.name)
                 counts["skipped"] += 1
-            else:
-                tasks.put((job, act))
+                continue
+            if _status(entry) == "done":
+                log.info("[%s/%s] cấu hình, nhân vật hoặc thuật toán đã đổi -> làm lại",
+                         job.name, act.name)
+            tasks.put((job, act, fingerprint))
 
     lock = threading.Lock()
 
@@ -128,11 +137,12 @@ def main(argv: list[str] | None = None) -> int:
         gpu = f"gpu{index} " if len(clients) > 1 else ""
         while True:
             try:
-                job, act = tasks.get_nowait()
+                job, act, fingerprint = tasks.get_nowait()
             except queue.Empty:
                 return
             status = run_action(worker_client, cfg, job, act, characters[job.name],
                                 out / job.name, f"[{gpu}{job.name}/{act.name}]")
+            status["fingerprint"] = fingerprint
             with lock:
                 progress_by_job[job.name][act.name] = status
                 counts[status["status"]] += 1
@@ -150,7 +160,42 @@ def main(argv: list[str] | None = None) -> int:
              _fmt(time.time() - started))
     if counts["error"]:
         log.info("Chạy lại cùng lệnh để thử lại các action lỗi (action đã xong sẽ được bỏ qua).")
+    if counts["skipped"] and not counts["done"] and not counts["error"]:
+        log.info("Mọi action đã có sẵn từ lần chạy trước, không tạo gì mới. Muốn tạo lại: đổi seed/"
+                 "prompt trong jobs.json, hoặc xoá thư mục %s", out)
     return 1 if counts["error"] else 0
+
+
+# Tăng số này khi thuật toán đổi: kết quả cũ (tạo bằng code cũ) tự được làm lại.
+# v2: tách nền nhân vật loang từ mép (sửa lỗi nền đen ăn thủng nhân vật).
+PIPELINE_VERSION = 2
+
+
+def _digest(*parts) -> str:
+    return hashlib.sha1(json.dumps(parts, sort_keys=True, default=str).encode()).hexdigest()[:12]
+
+
+def character_fingerprint(cfg: config.Settings, job: config.Job) -> str:
+    """Mọi thứ quyết định nhân vật. Đổi một trong số này -> tạo lại nhân vật."""
+    return _digest(PIPELINE_VERSION, job.mode, job.prompt, job.character_image, job.seed,
+                   cfg.seed, cfg.checkpoint, cfg.steps, cfg.cfg_scale, cfg.sampler, cfg.scheduler,
+                   cfg.char_height, cfg.palette, cfg.view, cfg.bg_color)
+
+
+def action_fingerprint(cfg: config.Settings, job: config.Job, act: config.Action, native) -> str:
+    """Mọi thứ quyết định một action, gồm cả ảnh nhân vật thật (đổi nhân vật -> làm lại)."""
+    return _digest(PIPELINE_VERSION, dataclasses.asdict(act), job.prompt, job.seed, cfg.seed,
+                   cfg.frame_size, cfg.fps, cfg.preview_scale, cfg.view, cfg.bg_color, cfg.wan,
+                   hashlib.sha1(native.tobytes()).hexdigest())
+
+
+def _character_is_current(cfg: config.Settings, job: config.Job, job_dir: Path) -> bool:
+    try:
+        info = json.loads((job_dir / "character.json").read_text(encoding="utf-8"))
+    except (FileNotFoundError, ValueError):
+        return False
+    return ((job_dir / "character.png").exists()
+            and info.get("fingerprint") == character_fingerprint(cfg, job))
 
 
 def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: config.Action,
@@ -179,7 +224,7 @@ def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: 
 def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Path) -> list[str]:
     """Kiểm tra node, model, ảnh đầu vào TRƯỚC khi tốn giờ GPU."""
     problems = []
-    need_sd = any(j.mode == "prompt" and not (out / j.name / "character.png").exists()
+    need_sd = any(j.mode == "prompt" and not _character_is_current(cfg, j, out / j.name)
                   for j in cfg.jobs)
     nodes = workflows.WAN_NODES + (workflows.SD15_NODES if need_sd else [])
     for node in client.missing_nodes(sorted(set(nodes))):
@@ -190,8 +235,8 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
     if need_sd and cfg.checkpoint == "auto":
         checkpoints = client.list_models("checkpoints")
         if checkpoints:
-            cfg.checkpoint = checkpoints[0]
-            log.info("checkpoint \"auto\" -> %s", cfg.checkpoint)
+            cfg.checkpoint_file = checkpoints[0]
+            log.info("checkpoint \"auto\" -> %s", cfg.checkpoint_file)
         else:
             problems.append("checkpoint SD1.5 nào đó trong checkpoints/ (Dataset chưa có file .safetensors)")
     elif need_sd:
@@ -203,7 +248,7 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
                             f"{', '.join(available[:8]) or 'không có gì'})")
 
     for job in cfg.jobs:
-        if job.mode == "image" and not (out / job.name / "character.png").exists():
+        if job.mode == "image" and not _character_is_current(cfg, job, out / job.name):
             if _resolve_path(job.character_image, jobs_dir) is None:
                 problems.append(f"ảnh nhân vật '{job.character_image}' của job {job.name}")
     return problems
@@ -211,26 +256,27 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
 
 def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
                      job_dir: Path, jobs_dir: Path):
-    """Trả về (sprite gốc, palette, có_gọi_GPU). Đã có character.png thì dùng lại."""
+    """Trả về (sprite gốc, palette, có_gọi_GPU).
+
+    Dùng lại character.png nếu được tạo với đúng cấu hình + thuật toán hiện tại; muốn
+    nhân vật khác với cùng cấu hình thì xoá character.png hoặc đổi seed.
+    """
     job_dir.mkdir(parents=True, exist_ok=True)
     char_path = job_dir / "character.png"
-    if char_path.exists():
+    if _character_is_current(cfg, job, job_dir):
         native = Image.open(char_path).convert("RGBA")
         log.info("[%s] dùng lại nhân vật có sẵn %s (%dx%d)", job.name, char_path.name, *native.size)
         return native, pipelines.palette_of(native, cfg.palette), False
+    if char_path.exists():
+        log.info("[%s] cấu hình nhân vật hoặc thuật toán đã đổi -> tạo lại nhân vật", job.name)
 
     t0 = time.time()
-    info: dict = {"mode": job.mode}
+    info: dict = {"mode": job.mode, "fingerprint": character_fingerprint(cfg, job)}
     if job.mode == "prompt":
         log.info("[%s] tạo nhân vật từ prompt...", job.name)
         raw, gen = pipelines.generate_character(client, cfg, job.prompt, job.seed)
         raw.save(job_dir / "character_raw.png")
         info.update(gen)
-        spread = matting.corner_spread(raw)
-        if spread > 24:
-            log.warning("[%s] nền ảnh SD không đồng nhất (lệch góc %.0f): tách nền có thể sót. "
-                        "Xem character_raw.png; có thể đổi seed hoặc dùng mode \"image\".",
-                        job.name, spread)
     else:
         src = _resolve_path(job.character_image, jobs_dir)
         info["source"] = str(src)

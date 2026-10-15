@@ -203,6 +203,40 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(out)]), 0)
             _close_log_handlers()  # Windows không xoá được thư mục tạm khi file log còn mở
 
+    def test_stale_output_is_redone_and_changes_are_detected(self):
+        # Lỗi thật: chạy lại trong cùng session -> output cũ (code cũ) bị "bỏ qua" hết
+        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+            d, out = Path(d), Path(d) / "o"
+            acts = [{"name": "idle", "prompt": "idle", "frames": 4},
+                    {"name": "walk", "prompt": "walk", "frames": 4}]
+            jobs = {"comfy_url": fake.url, "checkpoint": "auto", "debug": False,
+                    "jobs": [{"name": "r", "prompt": "samurai", "actions": acts}]}
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            run = lambda: run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(out)])
+            # Giả lập output của bản cũ: progress "done" và character.json không có fingerprint
+            (out / "r" / "idle").mkdir(parents=True)
+            Image.new("RGBA", (40, 64), (9, 9, 9, 255)).save(out / "r" / "character.png")
+            (out / "r" / "character.json").write_text("{}", encoding="utf-8")
+            Image.new("RGBA", (8, 8)).save(out / "r" / "idle" / "spritesheet.png")
+            (out / "r" / "progress.json").write_text(json.dumps({"idle": "done"}), encoding="utf-8")
+
+            self.assertEqual(run(), 0)
+            classes = [{n["class_type"] for n in g.values()} for g in fake.prompts]
+            self.assertEqual(sum("CheckpointLoaderSimple" in c for c in classes), 1)  # nhân vật tạo lại
+            self.assertEqual(sum("UNETLoader" in c for c in classes), 2)  # cả 2 action làm lại
+
+            n = len(fake.prompts)
+            self.assertEqual(run(), 0)  # không đổi gì -> không gọi GPU
+            self.assertEqual(len(fake.prompts), n)
+
+            jobs["jobs"][0]["actions"][1]["prompt"] = "walking slowly"  # chỉ sửa walk
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            self.assertEqual(run(), 0)
+            redone = fake.prompts[n:]
+            self.assertEqual(len(redone), 1)
+            self.assertIn("walking slowly", json.dumps(redone[0]))
+            _close_log_handlers()
+
     def test_two_gpus_split_actions(self):
         with FakeComfy() as gpu0, FakeComfy() as gpu1, tempfile.TemporaryDirectory() as d:
             d = Path(d)
@@ -252,7 +286,7 @@ class EndToEndTests(unittest.TestCase):
                 self.assertEqual(cfg.checkpoint, "auto")
                 problems = run_batch.preflight(comfy.ComfyClient(fake.url), cfg, Path(d), Path(d))
                 self.assertEqual(problems, [])
-                self.assertEqual(cfg.checkpoint, "pixel_test.safetensors")
+                self.assertEqual(cfg.checkpoint_file, "pixel_test.safetensors")
 
     def test_preflight_reports_missing_model(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:

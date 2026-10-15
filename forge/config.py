@@ -59,7 +59,8 @@ class Job:
 @dataclass
 class Settings:
     comfy_url: str = "http://127.0.0.1:8188"
-    checkpoint: str | None = None
+    checkpoint: str | None = None          # như trong jobs.json (có thể là "auto")
+    checkpoint_file: str | None = None     # file thật khi checkpoint = "auto" (preflight điền)
     seed: int = -1
     steps: int = 30
     cfg_scale: float = 7.0

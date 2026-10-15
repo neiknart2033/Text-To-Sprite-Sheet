@@ -67,7 +67,7 @@ def generate_character(client: ComfyClient, cfg: Settings, description: str,
     tries = []
     for attempt in range(CHAR_ATTEMPTS):
         s = first + attempt
-        graph = workflows.sd15_txt2img(cfg.checkpoint, prompt, negative, s,
+        graph = workflows.sd15_txt2img(cfg.checkpoint_file or cfg.checkpoint, prompt, negative, s,
                                        steps=cfg.steps, cfg=cfg.cfg_scale,
                                        sampler=cfg.sampler, scheduler=cfg.scheduler)
         raw = client.fetch(client.run(graph, workflows.SD15_OUTPUT, timeout_s=900)[0]).convert("RGB")
