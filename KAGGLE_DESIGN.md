@@ -49,8 +49,9 @@ Dự án theo **GPL-3.0** (vì có code GPLv3). Ảnh đầu ra không bị ràn
 jobs.json
   │
   ├─ LƯỢT 1  nhân vật (mọi job)                         forge.pipelines.generate_character / prepare_character
-  │    mode "prompt": SD1.5 txt2img 512², prompt có trọng số "(plain flat green background:1.4)";
-  │                   nền đo ở viền sai màu/không đều -> gen lại seed+1 (tối đa 3 lần)
+  │    mode "prompt": SD1.5 txt2img 512x768 "simple white background" (không trọng số: nền xanh
+  │                   có trọng số làm màu xanh lan sang quần áo); nền viền không đều hoặc nhân vật
+  │                   chạm mép ảnh -> gen lại seed+1 (tối đa 3 lần), lấy ảnh tốt nhất
   │    mode "image" : ảnh có sẵn (trong suốt hoặc nền một màu)
   │    ──► tách nền LOANG TỪ MÉP (matting.cutout_flat): chỉ xoá nền nối với mép ảnh + khoảng
   │        nền bị kẹp đủ lớn; KHÔNG xoá mọi pixel cùng màu nền (lỗi thật: nền đen ăn 24% thân
@@ -60,7 +61,7 @@ jobs.json
   │    ──► POST /free (gỡ SD khỏi VRAM)
   │
   └─ LƯỢT 2  animation (mọi action, resume theo progress.json)   forge.pipelines.animate_video + finalize
-       character.png phóng ×k (NEAREST, nhân vật ≈ 60% chiều cao) lên canvas 448² nền key
+       character.png phóng ×k (NEAREST, nhân vật ≈ 60% chiều cao) lên canvas 640² nền key (màu phông thật: xanh (0,177,64)/xanh dương/magenta dịu)
        (key = green/magenta/blue khác xa palette nhất) ──► upload
        ──► WAN 2.2 TI2V 5B (uni_pc, 20 steps, cfg 5, shift 8) clip 4n+1 frame @24fps
        ──► lấy N frame cách đều trên 85% đầu clip (chỉ tải về N frame đó)
@@ -150,7 +151,7 @@ Notebook sinh từ script, nội dung cell 5 lấy nguyên `kaggle/jobs.example.
     "unet": "wan2.2_ti2v_5B_fp16.safetensors",
     "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     "vae": "wan2.2_vae.safetensors",
-    "width": 448, "height": 448,
+    "width": 640, "height": 640,
     "steps": 20, "cfg": 5.0, "shift": 8.0,
     "duration": 2.0, "useful_fraction": 0.85,
     "char_fill": 0.6, "timeout_s": 3600
@@ -220,10 +221,11 @@ Log mỗi action: tên, thời gian, dung lượng 3 file; cảnh báo pixel b�
 | Cell 2 setup (clone + pip) | ~5–8 phút | |
 | Tải WAN từ HF (khi không có trong dataset) | vài phút | ~17GB |
 | Cell 3 start ComfyUI | ~1–2 phút | model nạp ở prompt đầu |
-| Nhân vật SD1.5 512², 30 steps | ~10–30s/job | |
+| Nhân vật SD1.5 512x768, 30 steps | ~20–60s/job | tối đa 3 lần gen nếu ảnh hỏng |
 | **1 action WAN 448², 49 frame, 20 steps** | **~1m24s** | đo thật trên Kaggle T4 (10/2026), ổn định giữa các action |
 | **21 action** | **~30 phút** | ≪ 3 giờ của DoD; 30h/tuần đủ chạy hàng chục batch |
-| 21 action trên T4 x2 | ~15 phút (ước tính) | chưa đo; rủi ro RAM ~29GB với 2 bản WAN → `NUM_GPUS = 1` |
+| 21 action trên T4 x2 (448²) | ~15 phút | 2 GPU chạy được trên Kaggle (10/2026) |
+| 1 action WAN 640² (mặc định v3) | ~3 phút (ước tính) | 2× token; cần đo lại |
 
 Thời gian bị giới hạn bởi GPU, không phải code: log thật cho thấy thời gian tỉ lệ đúng
 với số frame video (49 frame 84s, 73 frame 128s, ≈1.8s/frame, phần cố định ≈0). Lý thuyết:

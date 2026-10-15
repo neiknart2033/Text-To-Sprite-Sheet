@@ -10,8 +10,10 @@ WAN_DEFAULTS = {
     "unet": "wan2.2_ti2v_5B_fp16.safetensors",
     "text_encoder": "umt5_xxl_fp8_e4m3fn_scaled.safetensors",
     "vae": "wan2.2_vae.safetensors",
-    "width": 448,
-    "height": 448,
+    # WAN 2.2 5B nén 32x32 pixel thành 1 token. Ở 448px nhân vật gầy chỉ rộng ~3 token
+    # -> clip thật bị biến hình/zoom/tan biến. 640px: gấp đôi số token, chậm ~2 lần.
+    "width": 640,
+    "height": 640,
     "steps": 20,
     "cfg": 5.0,
     "shift": 8.0,

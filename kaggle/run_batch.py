@@ -168,7 +168,9 @@ def main(argv: list[str] | None = None) -> int:
 
 # Tăng số này khi thuật toán đổi: kết quả cũ (tạo bằng code cũ) tự được làm lại.
 # v2: tách nền nhân vật loang từ mép (sửa lỗi nền đen ăn thủng nhân vật).
-PIPELINE_VERSION = 2
+# v3: nhân vật nền trắng 512x768 + loại ảnh bị cắt mép; WAN 640px, key màu phông thật,
+#     chọn frame lành trong ±2 frame.
+PIPELINE_VERSION = 3
 
 
 def _digest(*parts) -> str:

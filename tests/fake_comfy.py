@@ -30,16 +30,18 @@ MODELS = {
 }
 
 
-def fake_character(seed: int, black_bg: bool = False) -> Image.Image:
-    """black_bg=True mô phỏng lỗi thật: SD vẽ nền đen tuyền cho nhân vật tối màu."""
+def fake_character(seed: int, bg: str = "green", cut: bool = False) -> Image.Image:
+    """bg="black" mô phỏng lỗi thật: SD vẽ nền đen tuyền cho nhân vật tối màu.
+    cut=True: nhân vật tụt xuống, chân bị cắt ở mép dưới ảnh."""
     rng = np.random.default_rng(seed)
     a = np.zeros((512, 512, 3), np.int16)
-    if not black_bg:
-        a[:] = (40, 190, 80)
+    if bg != "black":
+        a[:] = {"green": (40, 190, 80), "white": (245, 245, 245)}[bg]
         a += rng.integers(-6, 7, a.shape, dtype=np.int16)  # nền không phẳng tuyệt đối
+    dy = 15 if cut else 0
 
     def block(x0, y0, x1, y1, color):
-        a[y0 * 8:y1 * 8, x0 * 8:x1 * 8] = color
+        a[(y0 + dy) * 8:(y1 + dy) * 8, x0 * 8:x1 * 8] = color
 
     block(28, 14, 36, 22, (230, 190, 150))   # đầu
     block(27, 13, 37, 14, (20, 20, 30))      # tóc
@@ -113,7 +115,9 @@ class FakeComfy:
             images, out_node = fake_video(start, node["inputs"]["length"], seed), workflows.WAN_OUTPUT
         else:
             seed = graph["3"]["inputs"]["seed"]
-            images = [fake_character(seed, black_bg="BLACKBG" in texts)]
+            bg = ("black" if "BLACKBG" in texts else
+                  "white" if "white background" in texts else "green")
+            images = [fake_character(seed, bg=bg, cut="CUTFEET" in texts)]
             out_node = workflows.SD15_OUTPUT
         infos = []
         for im in images:

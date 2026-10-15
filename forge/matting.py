@@ -28,11 +28,13 @@ PRESETS = {
     "black": (0, 0, 0),
 }
 
-# Màu tô nền khi CHÚNG TA dựng ảnh (canvas đưa vào WAN): màu thuần, dễ tách nhất
+# Màu tô nền khi CHÚNG TA dựng ảnh (canvas đưa vào WAN). Dùng màu phông xanh/xanh dương
+# thật thay vì màu thuần (0,255,0): chạy thật, WAN "sửa" mảng xanh thuần quá gắt thành
+# các khung chữ nhật nhạt màu quanh nhân vật, tách nền xong thành mảnh vụn.
 KEY_FILL = {
-    "green": (0, 255, 0),
-    "magenta": (255, 0, 255),
-    "blue": (0, 0, 255),
+    "green": (0, 177, 64),
+    "magenta": (200, 40, 200),
+    "blue": (0, 71, 187),
     "white": (255, 255, 255),
 }
 
@@ -159,11 +161,27 @@ def cutout_flat(image: Image.Image, tolerance: float | None = None,
 
 
 def matches_key(image: Image.Image, key: str) -> tuple[bool, list[int]]:
-    """Nền ảnh có đúng màu key yêu cầu và đồng nhất không (để quyết định gen lại)."""
+    """Nền ảnh có gần màu key yêu cầu và đồng nhất không (để quyết định gen lại).
+
+    Đồng nhất = >= 85% pixel viền ảnh lệch <= 40 so với màu nền. Không xét riêng 4 góc:
+    ảnh SD hay tối ở góc (vignette), lần chạy thật bị đánh "sai nền" oan cả 3 lần.
+    """
     a = np.asarray(image.convert("RGB")).astype(np.int16)
     bg = border_color(a)
+    border = np.concatenate([a[0], a[-1], a[:, 0], a[:, -1]])
+    uniform = float((np.abs(border - bg).max(1) <= 40).mean()) >= 0.85
     targets = [np.array(KEY_FILL.get(key, PRESETS.get(key, (0, 255, 0))), float)]
     if key in PRESETS:
         targets.append(np.array(PRESETS[key], float))
     close = min(float(np.sqrt(((bg - t) ** 2).sum())) for t in targets) < 120
-    return close and corner_spread(image) <= 24, [int(c) for c in bg]
+    return close and uniform, [int(c) for c in bg]
+
+
+def key_tolerance(key_rgb, palette: np.ndarray, default: float = 66.0) -> float:
+    """Ngưỡng tách nền cho frame WAN: rộng nhất có thể mà không chạm màu nào của nhân vật.
+
+    WAN làm nền lệch màu cục bộ; ngưỡng rộng bắt được, nhưng không được vượt quá ~60%
+    khoảng cách từ màu key tới màu gần nhất của nhân vật.
+    """
+    d = np.sqrt(((palette.astype(np.float32) - np.array(key_rgb, np.float32)) ** 2).sum(1))
+    return float(np.clip(0.6 * d.min(), 40.0, 110.0)) if len(d) else default

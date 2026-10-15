@@ -5,7 +5,7 @@ hành động: `spritesheet.png` + `manifest.json` + `preview.gif`.
 
 Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`):
 
-1. **Nhân vật:** checkpoint SD1.5 pixel art vẽ nhân vật trên nền xanh. Sau đó
+1. **Nhân vật:** checkpoint SD1.5 pixel art vẽ nhân vật trên nền trắng (512×768). Sau đó
    tách nền, thu về kích thước pixel gốc (mặc định cao 64px) và rút palette màu.
 2. **Chuyển động:** WAN 2.2 TI2V 5B nhận ảnh nhân vật + câu mô tả hành động,
    rồi tạo một clip video ngắn. Tool lấy N frame cách đều từ clip.
@@ -130,10 +130,10 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 | `palette` | `32` | Số màu tối đa. Mọi frame dùng chung palette của nhân vật |
 | `fps` | `10` | FPS ghi vào manifest và GIF |
 | `view` | `"side"` | `"side"` (nhìn ngang, quay phải) hoặc `"front"` |
-| `bg_color` | `"auto"` | Màu nền dùng để tách. `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
+| `bg_color` | `"auto"` | Màu nền của canvas đưa vào WAN (nhân vật SD luôn vẽ nền trắng). `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
 | `debug` | `true` | Lưu `debug/input.png` (ảnh đưa vào WAN) và `debug/clip.gif` (cả clip WAN trả về) cho mỗi action, để soi lỗi |
-| `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (448), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
+| `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
 `prompt`) hoặc `"image"` (cần `character_image`); `seed` (tùy chọn); `actions`.
@@ -214,9 +214,12 @@ output/
 | Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
 | Khởi động ComfyUI | ~1–2 phút |
 | 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
-| **1 action WAN (448², clip 2s = 49 frame, 20 steps)** | **~1 phút 24 giây** mỗi GPU (đo trên Kaggle T4, 10/2026) |
-| **21 action, 1 GPU** | **~30 phút** (+ cài đặt) |
-| **21 action, T4 x2** | **~15 phút** (ước tính: 2 GPU chia đôi số action; GPU thứ 2 chờ 45s lúc đầu để không nạp model cùng lúc) |
+| 1 action WAN ở 448² (clip 2s = 49 frame, 20 steps) | ~1 phút 24 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
+| **1 action WAN ở 640² (mặc định từ v3)** | **~3 phút** mỗi GPU (ước tính: gấp đôi số token) |
+| **21 action, T4 x2, 640²** | **~30–35 phút** (ước tính) |
+
+Vì sao 640 mà không 448: WAN 2.2 5B nén 32×32 pixel thành 1 token; ở 448 nhân vật chỉ rộng
+vài token nên clip thật bị biến hình, zoom, tan biến. Muốn nhanh hơn (chấp nhận rủi ro đó): `"wan": {"width": 448, "height": 448}`.
 
 Thời gian tạo sprite do GPU quyết định. Đo trên log thật: thời gian tăng đúng theo
 số frame video WAN (~1,8 giây/frame), phần việc của code SpriteForge chỉ mất vài giây.

@@ -65,7 +65,7 @@ class UnitTests(unittest.TestCase):
 
     def test_dark_character_on_black_background_keeps_body(self):
         # Lỗi thật trên Kaggle: nền đen -> cách cũ xoá luôn tóc/chân đen của nhân vật
-        raw = fake_character(4, black_bg=True)
+        raw = fake_character(4, bg="black")
         leg = (29 * 8 + 4, 45 * 8)  # một pixel ở chân màu (25,25,25)
         self.assertLess(matting.remove_background(raw, "auto").getpixel(leg)[3], 128)  # cách cũ: mất chân
         self.assertEqual(matting.cutout_flat(raw).getpixel(leg)[3], 255)
@@ -74,6 +74,36 @@ class UnitTests(unittest.TestCase):
         self.assertLess(pixel.hole_ratio(new), 0.01)
         self.assertFalse(matting.matches_key(raw, "green")[0])
         self.assertTrue(matting.matches_key(fake_character(4), "green")[0])
+
+    def test_vignette_corners_do_not_shrink_character(self):
+        # Lỗi thật: 4 góc ảnh SD tối hơn nền -> khung bao = cả ảnh -> nhân vật 52px thay vì 64px
+        a = np.asarray(fake_character(5, bg="white")).copy()
+        for ys, xs in ((slice(0, 4), slice(0, 4)), (slice(0, 4), slice(-4, None)),
+                       (slice(-4, None), slice(0, 4)), (slice(-4, None), slice(-4, None))):
+            a[ys, xs] = (200, 200, 200)
+        raw = Image.fromarray(a)
+        self.assertTrue(matting.matches_key(raw, "white")[0])  # góc tối không làm hỏng kiểm tra nền
+        native, _ = pipelines.prepare_character(raw, self._cfg())
+        self.assertEqual(native.height, 64)
+
+    def test_touches_edge(self):
+        self.assertFalse(pixel.touches_edge(matting.cutout_flat(fake_character(6, bg="white"))))
+        self.assertTrue(pixel.touches_edge(matting.cutout_flat(fake_character(6, bg="white", cut=True))))
+
+    def test_pick_frames_skips_glitches(self):
+        native, _ = pipelines.prepare_character(fake_character(8), self._cfg())
+        good = Image.new("RGBA", (112, 112), (0, 0, 0, 0))
+        good.alpha_composite(native, (30, 30))
+        blank = Image.new("RGBA", (112, 112), (0, 0, 0, 0))
+        big = pixel.upscale(native, 2).crop((0, 0, 112, 112))  # "zoom" đột ngột
+        frames = [good] * 49
+        glitch = {6: blank, 17: big, 23: blank, 24: blank}
+        frames = [glitch.get(i, f) for i, f in enumerate(frames)]
+        targets = workflows.frame_indices(49, 8, 0.85)
+        chosen = pipelines._pick_frames(targets, 49, lambda i: frames[i])
+        self.assertFalse(set(chosen) & set(glitch))
+        self.assertEqual(chosen, sorted(set(chosen)))
+        self.assertTrue(all(abs(c - t) <= pipelines.FRAME_SEARCH for c, t in zip(chosen, targets)))
 
     def test_place_in_cells_uniform_and_clipping(self):
         native, _ = pipelines.prepare_character(fake_character(2), self._cfg())
@@ -277,6 +307,21 @@ class EndToEndTests(unittest.TestCase):
             self.assertTrue((d / "o/dark/idle/debug/input.png").exists())
             with Image.open(d / "o/dark/idle/debug/clip.gif") as g:
                 self.assertEqual(g.n_frames, 49)
+            _close_log_handlers()
+
+    def test_character_cut_at_edge_is_regenerated(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 20,
+                    "debug": False, "jobs": [{"name": "c", "prompt": "CUTFEET ninja",
+                                              "actions": [{"name": "i", "prompt": "i", "frames": 2}]}]}
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")]), 0)
+            info = json.loads((d / "o/c/character.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(info["attempts"]), pipelines.CHAR_ATTEMPTS)
+            self.assertFalse(any(t["inside_frame"] for t in info["attempts"]))
+            self.assertTrue(all(t["background_ok"] for t in info["attempts"]))
+            self.assertIn("bị cắt", (d / "o/run_log.txt").read_text(encoding="utf-8"))
             _close_log_handlers()
 
     def test_example_jobs_parse_and_auto_checkpoint(self):

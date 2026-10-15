@@ -112,6 +112,9 @@ def key_color_for(palette: np.ndarray) -> str:
 def prepare_character(rgba: Image.Image, char_height: int, palette_size: int,
                       speck_area: int = 3) -> tuple[Image.Image, np.ndarray]:
     """Ảnh nhân vật (đã tách nền) -> sprite gốc cao <= char_height px + palette."""
+    # Bỏ đốm lạc TRƯỚC khi đo khung bao: vài pixel góc ảnh (vignette) từng kéo khung ra
+    # cả ảnh 512px -> nhân vật bị thu nhỏ quá tay (52px thay vì 64px).
+    rgba = remove_specks(binarize_alpha(rgba), speck_area, rel=0.005)
     box = bbox(rgba)
     if box is None:
         raise ValueError("Ảnh nhân vật trống sau khi tách nền")
@@ -125,6 +128,21 @@ def prepare_character(rgba: Image.Image, char_height: int, palette_size: int,
     rgba = apply_palette(rgba, palette)
     box = bbox(rgba)
     return (rgba.crop(box) if box else rgba), palette
+
+
+def touches_edge(rgba: Image.Image, margin: int = 2) -> bool:
+    """Nhân vật chạm mép ảnh (bị cắt chân/đầu) - sau khi đã bỏ đốm lạc."""
+    box = bbox(remove_specks(binarize_alpha(rgba), 3, rel=0.005))
+    if box is None:
+        return False
+    x0, y0, x1, y1 = box
+    return x0 < margin or y0 < margin or x1 > rgba.width - margin or y1 > rgba.height - margin
+
+
+def frame_stats(rgba: Image.Image) -> tuple[int, int]:
+    """(số pixel đục, số mảnh rời) của một frame đã về pixel gốc."""
+    mask = np.asarray(rgba)[:, :, 3] > 0
+    return int(mask.sum()), int(ndimage.label(mask, structure=_EIGHT)[1])
 
 
 def upscale(rgba: Image.Image, factor: int) -> Image.Image:
