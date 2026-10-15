@@ -13,7 +13,8 @@ Ghép từ hai dự án mã nguồn mở:
 | Đường dẫn | Nội dung |
 |---|---|
 | `kaggle/README.md` | **Hướng dẫn sử dụng** (bắt đầu từ đây) |
-| `kaggle/SpriteForge_Kaggle.ipynb` | Notebook import vào Kaggle |
+| `kaggle/SpriteForge_Kaggle.ipynb` | Notebook chính import vào Kaggle (hỗ trợ GPU T4 x2) |
+| `kaggle/SpriteForge_Models.ipynb` | Notebook phụ: tải model WAN 17GB một lần, lưu thành Output để gắn làm Input |
 | `kaggle/run_batch.py` | Chạy batch: `python kaggle/run_batch.py --jobs jobs.json --out output` |
 | `kaggle/jobs.example.json` | Mẫu: nhân vật Hắc Ronin, 8 hành động |
 | `forge/` | Thư viện: `comfy` (client), `workflows` (graph), `pipelines`, `pixel`, `matting`, `sheet`, `config` |

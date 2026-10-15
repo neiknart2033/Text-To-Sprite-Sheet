@@ -111,7 +111,7 @@ tests/
 | 0 (md) | 4 bước chuẩn bị + cách chạy |
 | 1 | Cấu hình: `SPRITEFORGE_REPO`, `COMFY_REF`, `RUN_BENCHMARK`, `WORK=/tmp/spriteforge`, `OUTPUT` |
 | 2 | Code SpriteForge (dataset `spriteforge-code` hoặc git clone) → clone ComfyUI + `pip install` → **gom model bằng symlink** vào `WORK/models/{checkpoints,diffusion_models,text_encoders,vae}`: checkpoint = mọi `.safetensors/.ckpt` trong `/kaggle/input` trừ 3 file WAN; file WAN lấy từ dataset nếu có, không thì `hf_hub_download` từ `Comfy-Org/Wan_2.2_ComfyUI_Repackaged` → ghi `extra_model_paths.yaml` |
-| 3 | Khởi động ComfyUI nền (`--listen 127.0.0.1 --port 8188 --preview-method none`), chờ `/system_stats`, in log nếu lỗi |
+| 3 | Mỗi GPU (`nvidia-smi -L`, giới hạn bởi `NUM_GPUS`) một ComfyUI nền: `CUDA_VISIBLE_DEVICES=i`, port `8188+i`, thư mục input/output/temp/user riêng (ComfyUI cũ không có cờ → chạy lại không cờ). Chờ `/system_stats`, in log nếu lỗi. Xuất `COMFY_URLS` |
 | 4 | (tùy chọn) benchmark `jobs.bench.json` |
 | 5 | `%%writefile /kaggle/working/jobs.json` (cell duy nhất user sửa) |
 | 6 | `run_batch.py --jobs ... --out /kaggle/working/output` |
@@ -119,6 +119,13 @@ tests/
 | 8 | (tùy chọn) hiển thị các `preview.gif` |
 
 ComfyUI và model đặt ở `/tmp` để không lẫn vào Output (giới hạn 20GB).
+`run_batch.py --comfy-url url1,url2`: lượt 1 (SD) chạy trên url1; lượt 2 mỗi URL một luồng
+lấy action từ hàng đợi chung (GPU thứ i chờ 45s×i trước việc đầu tiên để không nạp WAN vào RAM
+cùng lúc); `progress.json` ghi dưới khoá. URL không ping được thì bỏ qua.
+
+**Notebook phụ `kaggle/SpriteForge_Models.ipynb`** (CPU, Internet): tải 3 file WAN từ HF vào
+`/kaggle/working` (16.9GB < 20GB), Commit một lần; notebook chính Add Input output này. Cell 2
+tìm file theo tên trong `/kaggle/input/**`, nên không cần upload 17GB từ máy người dùng.
 Notebook sinh từ script, nội dung cell 5 lấy nguyên `kaggle/jobs.example.json`.
 
 ## 6. `jobs.json`: schema
@@ -216,6 +223,12 @@ Log mỗi action: tên, thời gian, dung lượng 3 file; cảnh báo pixel b�
 | Nhân vật SD1.5 512², 30 steps | ~10–30s/job | |
 | **1 action WAN 448², 49 frame, 20 steps** | **~1m24s** | đo thật trên Kaggle T4 (10/2026), ổn định giữa các action |
 | **21 action** | **~30 phút** | ≪ 3 giờ của DoD; 30h/tuần đủ chạy hàng chục batch |
+| 21 action trên T4 x2 | ~15 phút (ước tính) | chưa đo; rủi ro RAM ~29GB với 2 bản WAN → `NUM_GPUS = 1` |
+
+Thời gian bị giới hạn bởi GPU, không phải code: log thật cho thấy thời gian tỉ lệ đúng
+với số frame video (49 frame 84s, 73 frame 128s, ≈1.8s/frame, phần cố định ≈0). Lý thuyết:
+5B tham số × 2 (CFG) × ~2.5k token ≈ 50 TFLOP/step; T4 thực tế ~15–20 TFLOPS → ~3s/step.
+Còn có thể giảm (đánh đổi chất lượng): bớt `wan.steps`, clip ngắn hơn, `wan.width/height` 384.
 
 VRAM: WAN 5B fp16 ~10GB + latent nhỏ (448²×49 frame ≈ 2.5k token) → dự kiến vừa
 16GB. VAE decode là đỉnh VRAM. Rủi ro: fp16 trên T4 có thể sinh NaN (frame đen),

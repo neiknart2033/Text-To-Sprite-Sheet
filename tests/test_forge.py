@@ -203,6 +203,28 @@ class EndToEndTests(unittest.TestCase):
             self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(out)]), 0)
             _close_log_handlers()  # Windows không xoá được thư mục tạm khi file log còn mở
 
+    def test_two_gpus_split_actions(self):
+        with FakeComfy() as gpu0, FakeComfy() as gpu1, tempfile.TemporaryDirectory() as d:
+            d = Path(d)
+            run_batch.STAGGER_S = 0.3
+            acts = [{"name": f"a{i}", "prompt": "idle", "frames": 4} for i in range(6)]
+            acts[2]["prompt"] = "FAIL_ME"
+            jobs = {"checkpoint": "pixel_test.safetensors", "debug": False,
+                    "jobs": [{"name": "r", "prompt": "samurai", "actions": acts}]}
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            urls = f"{gpu0.url},http://127.0.0.1:9,{gpu1.url}"  # URL giữa không chạy -> bị bỏ qua
+            code = run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o"),
+                                   "--comfy-url", urls])
+            self.assertEqual(code, 1)
+            wan = lambda f: sum("UNETLoader" in {n["class_type"] for n in g.values()} for g in f.prompts)
+            self.assertEqual(wan(gpu0) + wan(gpu1), 6)
+            self.assertGreater(wan(gpu1), 0)  # GPU thứ 2 thật sự nhận việc
+            progress = json.loads((d / "o/r/progress.json").read_text(encoding="utf-8"))
+            self.assertEqual([progress[f"a{i}"]["status"] for i in range(6)],
+                             ["done", "done", "error", "done", "done", "done"])
+            self.assertIn("gpu1", (d / "o/run_log.txt").read_text(encoding="utf-8"))
+            _close_log_handlers()
+
     def test_wrong_background_retries_then_cuts_cleanly(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory() as d:
             d = Path(d)

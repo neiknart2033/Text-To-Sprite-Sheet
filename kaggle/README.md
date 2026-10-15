@@ -25,13 +25,15 @@ không bật được GPU và Internet.
    ví dụ `aziibpixelmix`, `PixelMonster` hoặc `Pixel Art Sprite Diffusion` trên Civitai.
 2. kaggle.com → **Datasets** → **New Dataset** → upload file → đặt tên
    `spriteforge-models` → chọn **Private** → Create.
-3. *(Tùy chọn, giúp khởi động nhanh hơn)* thêm 3 file WAN vào cùng dataset.
-   Nếu không thêm, notebook sẽ tự tải từ HuggingFace mỗi session (~17GB, vài phút):
-   - `wan2.2_ti2v_5B_fp16.safetensors` (9.3GB)
-   - `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (6.3GB)
-   - `wan2.2_vae.safetensors` (1.3GB)
+### 1.2b Model WAN: notebook `SpriteForge Models` (làm 1 lần, khỏi tải 17GB mỗi session)
+Không cần upload từ máy bạn: Kaggle tự tải từ HuggingFace về rồi lưu lại.
+1. **Code** → **New Notebook** → *File → Import Notebook* → chọn `kaggle/SpriteForge_Models.ipynb`.
+2. *Session options*: **Accelerator = None** (chỉ dùng CPU, không tốn quota GPU), **Internet = On**.
+3. *Save Version* → **Save & Run All (Commit)**. Chờ khoảng 5–15 phút đến khi version báo chạy xong.
+   Output của nó sẽ có 3 file: `wan2.2_ti2v_5B_fp16.safetensors` (9.3GB),
+   `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (6.3GB), `wan2.2_vae.safetensors` (1.3GB).
 
-   Cả ba lấy từ `huggingface.co/Comfy-Org/Wan_2.2_ComfyUI_Repackaged`, thư mục `split_files/`.
+Bỏ qua bước này thì notebook chính vẫn chạy được, nhưng mỗi session sẽ tự tải lại 17GB.
 
 Notebook tự tìm mọi file `.safetensors` trong các dataset đã gắn, nên tên thư
 mục bên trong dataset không quan trọng. Chỉ để checkpoint trong dataset này,
@@ -52,9 +54,11 @@ mục bên trong dataset không quan trọng. Chỉ để checkpoint trong datas
 ### 1.4 Tạo notebook
 1. kaggle.com → **Code** → **New Notebook** → *File → Import Notebook* → chọn
    `kaggle/SpriteForge_Kaggle.ipynb`.
-2. Panel phải → *Session options*: **Accelerator: GPU T4** (T4 x2 cũng được, ComfyUI chỉ dùng
-   1 card; tránh P100 vì chậm với fp16), **Internet: On**.
-3. **Add Input** → chọn `spriteforge-models` (và `spriteforge-code` nếu dùng cách A).
+2. Panel phải → *Session options*: **Accelerator: GPU T4 x2**, **Internet: On**.
+   Có 2 GPU thì notebook chạy 2 ComfyUI song song, mỗi GPU một cái, nên nhanh gần gấp đôi.
+   Tránh P100 vì chậm với fp16.
+3. **Add Input** → chọn `spriteforge-models`, notebook **SpriteForge Models** (tab *Notebooks* /
+   *Your Work*), và `spriteforge-code` nếu dùng cách A.
 
 ---
 
@@ -195,6 +199,7 @@ output/
 | `Nhân vật bị thủng ...% thân` | Tách nền ăn mất chi tiết: đổi seed của job, hoặc dùng `mode: "image"` với ảnh nền trong suốt |
 | Animation méo, vỡ mảnh | Mở `debug/clip.gif`: nếu clip WAN đã méo thì sửa prompt action/đổi seed; nếu clip đẹp mà sheet vỡ thì là lỗi hậu xử lý, gửi log + clip cho người bảo trì |
 | `ComfyUI không khởi động được` | Đọc log in ra ở cell 3 (thường do pip cài lỗi) |
+| Session chết / "Kernel died" / lỗi kết nối giữa chừng khi dùng T4 x2 | Thiếu RAM khi 2 ComfyUI cùng giữ model: ở cell 1 đặt `NUM_GPUS = 1`, chạy lại từ cell 1. Action đã xong không bị chạy lại |
 | Hết 30 giờ GPU/tuần | Chờ reset hằng tuần, hoặc thuê Vast.ai/RunPod (notebook chạy được trên mọi máy Linux có GPU) |
 
 ---
@@ -207,8 +212,12 @@ output/
 | Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
 | Khởi động ComfyUI | ~1–2 phút |
 | 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
-| **1 action WAN (448², clip 2s = 49 frame, 20 steps)** | **~1 phút 24 giây** (đo trên Kaggle T4, 10/2026) |
-| **21 action** | **~30 phút** (+ ~15 phút cài đặt) |
+| **1 action WAN (448², clip 2s = 49 frame, 20 steps)** | **~1 phút 24 giây** mỗi GPU (đo trên Kaggle T4, 10/2026) |
+| **21 action, 1 GPU** | **~30 phút** (+ cài đặt) |
+| **21 action, T4 x2** | **~15 phút** (ước tính: 2 GPU chia đôi số action; GPU thứ 2 chờ 45s lúc đầu để không nạp model cùng lúc) |
+
+Thời gian tạo sprite do GPU quyết định. Đo trên log thật: thời gian tăng đúng theo
+số frame video WAN (~1,8 giây/frame), phần việc của code SpriteForge chỉ mất vài giây.
 
 Thời gian gần như tỉ lệ với `duration` × `wan.steps`. Còn dư nhiều quota, nên có
 thể tăng `wan.steps` lên 30 để thử chất lượng tốt hơn (~2 phút/action).

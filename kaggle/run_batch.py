@@ -4,8 +4,9 @@
     python kaggle/run_batch.py --jobs jobs.json --out /kaggle/working/output
 
 Hai lượt để không nạp đi nạp lại model:
-  lượt 1  nhân vật của mọi job (SD1.5), rồi gỡ SD khỏi VRAM;
-  lượt 2  animation của mọi action (WAN 2.2).
+  lượt 1  nhân vật của mọi job (SD1.5, trên ComfyUI đầu tiên), rồi gỡ SD khỏi VRAM;
+  lượt 2  animation của mọi action (WAN 2.2), chia đều cho mọi ComfyUI trong
+          --comfy-url (Kaggle "GPU T4 x2": 2 ComfyUI, mỗi cái một GPU -> nhanh ~2 lần).
 Resume: action đã "done" trong <job>/progress.json thì bỏ qua. Một action lỗi
 được ghi log rồi chạy tiếp action sau, không dừng cả batch.
 """
@@ -14,7 +15,9 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import queue
 import sys
+import threading
 import time
 import traceback
 from pathlib import Path
@@ -30,11 +33,17 @@ from forge.comfy import ComfyClient, ComfyError  # noqa: E402
 log = logging.getLogger("spriteforge")
 
 
+# GPU thứ 2 trở đi chờ trước khi nhận việc đầu tiên: tránh hai tiến trình ComfyUI
+# cùng nạp ~17GB model vào RAM (~29GB trên Kaggle) một lúc.
+STAGGER_S = 45.0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="SpriteForge batch: jobs.json -> sprite sheets")
     ap.add_argument("--jobs", required=True, help="đường dẫn jobs.json")
     ap.add_argument("--out", required=True, help="thư mục xuất kết quả")
-    ap.add_argument("--comfy-url", help="ghi đè comfy_url trong jobs.json")
+    ap.add_argument("--comfy-url", help="ghi đè comfy_url trong jobs.json; nhiều GPU = nhiều URL "
+                                        "cách nhau dấu phẩy, mỗi URL một ComfyUI")
     args = ap.parse_args(argv)
 
     out = Path(args.out)
@@ -46,9 +55,20 @@ def main(argv: list[str] | None = None) -> int:
     except config.ConfigError as e:
         log.error("jobs.json lỗi: %s", e)
         return 2
-    client = ComfyClient(args.comfy_url or cfg.comfy_url)
+    urls = [u.strip() for u in (args.comfy_url or cfg.comfy_url).split(",") if u.strip()]
+    clients = []
+    for url in urls:
+        c = ComfyClient(url)
+        try:
+            c.ping()
+            clients.append(c)
+        except ComfyError as e:
+            log.warning("Bỏ qua %s: %s", url, e)
+    if not clients:
+        log.error("Không kết nối được ComfyUI nào: %s", ", ".join(urls))
+        return 2
+    client = clients[0]
     try:
-        client.ping()
         problems = preflight(client, cfg, Path(args.jobs).resolve().parent, out)
     except ComfyError as e:
         log.error("%s", e)
@@ -61,7 +81,8 @@ def main(argv: list[str] | None = None) -> int:
 
     started = time.time()
     total_actions = sum(len(j.actions) for j in cfg.jobs)
-    log.info("Bắt đầu: %d job, %d action -> %s", len(cfg.jobs), total_actions, out)
+    log.info("Bắt đầu: %d job, %d action, %d GPU -> %s", len(cfg.jobs), total_actions,
+             len(clients), out)
 
     # ---------------- lượt 1: nhân vật
     characters, char_errors, generated = {}, {}, False
@@ -78,52 +99,81 @@ def main(argv: list[str] | None = None) -> int:
     if generated:
         client.free()
 
-    # ---------------- lượt 2: animation
-    done = skipped = failed = 0
+    # ---------------- lượt 2: animation, mỗi GPU (ComfyUI) một luồng lấy việc từ hàng đợi
+    counts = {"done": 0, "skipped": 0, "error": 0}
+    progress_by_job: dict[str, dict] = {}
+    tasks: queue.Queue = queue.Queue()
     for job in cfg.jobs:
         job_dir = out / job.name
-        progress = _load_progress(job_dir)
+        progress = progress_by_job[job.name] = _load_progress(job_dir)
         if job.name not in characters:
             for act in job.actions:
                 progress[act.name] = {"status": "error", "error": f"nhân vật lỗi: {char_errors[job.name]}"}
-                failed += 1
+                counts["error"] += 1
             _save_progress(job_dir, progress)
             continue
-        native, palette = characters[job.name]
         for act in job.actions:
-            tag = f"[{job.name}/{act.name}]"
             if _status(progress.get(act.name)) == "done" and (job_dir / act.name / "spritesheet.png").exists():
-                log.info("%s đã xong trước đó, bỏ qua", tag)
-                skipped += 1
-                continue
-            t0 = time.time()
-            log.info("%s bắt đầu: %d frame, %.1fs clip", tag, act.frames, act.duration)
+                log.info("[%s/%s] đã xong trước đó, bỏ qua", job.name, act.name)
+                counts["skipped"] += 1
+            else:
+                tasks.put((job, act))
+
+    lock = threading.Lock()
+
+    def worker(index: int, worker_client: ComfyClient) -> None:
+        wait_until = time.time() + STAGGER_S * index
+        while time.time() < wait_until and not tasks.empty():
+            time.sleep(0.5)
+        gpu = f"gpu{index} " if len(clients) > 1 else ""
+        while True:
             try:
-                frames, layout, info = pipelines.animate_video(
-                    client, cfg, native, palette, act,
-                    description=job.prompt if job.mode == "prompt" else None, seed=job.seed,
-                    debug_dir=job_dir / act.name / "debug" if cfg.debug else None)
-                result = pipelines.finalize(frames, layout, act, cfg, job_dir / act.name,
-                                            meta={"job": job.name, **info})
-                secs = time.time() - t0
-                sizes = ", ".join(f"{p.name} {_kb(p)}" for p in result["paths"].values())
-                log.info("%s xong trong %s (%s)", tag, _fmt(secs), sizes)
-                progress[act.name] = {"status": "done", "seconds": round(secs, 1), "seed": info["seed"]}
-                done += 1
-            except Exception as e:  # noqa: BLE001
-                secs = time.time() - t0
-                log.error("%s LỖI sau %s: %s\n%s", tag, _fmt(secs), e, traceback.format_exc())
-                progress[act.name] = {"status": "error", "error": f"{type(e).__name__}: {e}",
-                                      "seconds": round(secs, 1)}
-                failed += 1
-            _save_progress(job_dir, progress)
+                job, act = tasks.get_nowait()
+            except queue.Empty:
+                return
+            status = run_action(worker_client, cfg, job, act, characters[job.name],
+                                out / job.name, f"[{gpu}{job.name}/{act.name}]")
+            with lock:
+                progress_by_job[job.name][act.name] = status
+                counts[status["status"]] += 1
+                _save_progress(out / job.name, progress_by_job[job.name])
+
+    threads = [threading.Thread(target=worker, args=(i, c), daemon=True) for i, c in enumerate(clients)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
 
     log.info("=" * 60)
     log.info("Tổng kết: %d xong, %d bỏ qua (đã có), %d lỗi / %d action. Thời gian: %s",
-             done, skipped, failed, total_actions, _fmt(time.time() - started))
-    if failed:
+             counts["done"], counts["skipped"], counts["error"], total_actions,
+             _fmt(time.time() - started))
+    if counts["error"]:
         log.info("Chạy lại cùng lệnh để thử lại các action lỗi (action đã xong sẽ được bỏ qua).")
-    return 1 if failed else 0
+    return 1 if counts["error"] else 0
+
+
+def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: config.Action,
+               character, job_dir: Path, tag: str) -> dict:
+    """Một action: WAN -> hậu xử lý -> 3 file. Không bao giờ ném lỗi ra ngoài."""
+    native, palette = character
+    t0 = time.time()
+    log.info("%s bắt đầu: %d frame, %.1fs clip", tag, act.frames, act.duration)
+    try:
+        frames, layout, info = pipelines.animate_video(
+            client, cfg, native, palette, act,
+            description=job.prompt if job.mode == "prompt" else None, seed=job.seed,
+            debug_dir=job_dir / act.name / "debug" if cfg.debug else None)
+        result = pipelines.finalize(frames, layout, act, cfg, job_dir / act.name,
+                                    meta={"job": job.name, **info})
+        secs = time.time() - t0
+        sizes = ", ".join(f"{p.name} {_kb(p)}" for p in result["paths"].values())
+        log.info("%s xong trong %s (%s)", tag, _fmt(secs), sizes)
+        return {"status": "done", "seconds": round(secs, 1), "seed": info["seed"]}
+    except Exception as e:  # noqa: BLE001 - lỗi 1 action không được dừng cả batch
+        secs = time.time() - t0
+        log.error("%s LỖI sau %s: %s\n%s", tag, _fmt(secs), e, traceback.format_exc())
+        return {"status": "error", "error": f"{type(e).__name__}: {e}", "seconds": round(secs, 1)}
 
 
 def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Path) -> list[str]:
