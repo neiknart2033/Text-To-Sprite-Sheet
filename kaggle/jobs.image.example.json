@@ -1,5 +1,4 @@
 {
-  "checkpoint": "auto",
   "frame_size": 128,
   "fps": 10,
   "view": "side",
@@ -16,7 +15,7 @@
         {"name": "attack", "prompt": "swings the sword horizontally, then returns to stance", "frames": 8},
         {"name": "hurt",   "prompt": "recoils backward from a hit, then recovers", "frames": 6, "loop": false},
         {"name": "jump",   "prompt": "crouches, jumps straight up, then lands", "frames": 6, "loop": false},
-        {"name": "death",  "prompt": "staggers, drops to the knees and collapses to the ground", "frames": 8, "loop": false, "duration": 3.0}
+        {"name": "death",  "prompt": "staggers, drops to the knees and collapses to the ground", "frames": 8, "loop": false}
       ]
     }
   ]

@@ -1,5 +1,4 @@
 {
-  "checkpoint": "auto",
   "seed": 42,
   "frame_size": 128,
   "char_height": 64,
@@ -9,7 +8,7 @@
       "mode": "prompt",
       "prompt": "dark samurai in black armor, red oni mask",
       "actions": [
-        {"name": "idle", "prompt": "standing still in a ready stance, calm breathing", "frames": 8}
+        {"name": "attack", "prompt": "draws a katana and slashes horizontally, then returns to stance", "frames": 6}
       ]
     }
   ]

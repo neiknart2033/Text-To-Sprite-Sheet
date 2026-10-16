@@ -8,7 +8,24 @@ from pathlib import Path
 
 from .poses import PRESETS as POSE_PRESETS
 
-ENGINES = ("pose", "video")
+ENGINES = ("edit", "pose", "video")
+# Engine "edit" (mặc định): FLUX.2 [klein] 4B, Apache-2.0. Tạo nhân vật từ mô tả và vẽ từng
+# frame bằng cách sửa "con rối" (sprite mẫu uốn theo khung xương, forge/puppet.py) theo
+# chính sprite mẫu. Model sửa ảnh giữ nhân vật mẫu tốt hơn hẳn IP-Adapter của SD1.5.
+EDIT_DEFAULTS = {
+    # 3 file của template chính thức ComfyUI (cell 2 notebook tự tải nếu Input chưa có)
+    "unet": "flux-2-klein-4b-fp8.safetensors",   # 3.8GB, black-forest-labs/FLUX.2-klein-4b-fp8
+    "text_encoder": "qwen_3_4b.safetensors",     # 7.5GB, Comfy-Org/z_image_turbo
+    "vae": "flux2-vae.safetensors",              # 0.3GB, Comfy-Org/flux2-dev
+    "size": 768,          # cạnh ảnh model vẽ mỗi frame (bội của 16); nhân vật cao ~58%
+    "steps": 4,           # bản distilled: 4 bước
+    "cfg": 1.0,
+    # Ảnh vẽ lại không theo tư thế con rối (model chép tư thế đứng của ảnh mẫu) -> vẽ lại
+    # kiểu img2img từ chính con rối: giữ 30% ảnh con rối -> tư thế chắc chắn đúng.
+    "fallback_denoise": 0.7,
+    "follow_threshold": 0.7,   # độ khớp hình bóng tối thiểu với con rối (forge/puppet.py)
+    "timeout_s": 900,
+}
 POSE_DEFAULTS = {
     "controlnet": "control_v11p_sd15_openpose_fp16.safetensors",
     "strength": 1.0,           # độ bám khung xương của ControlNet
@@ -63,8 +80,8 @@ class Action:
     align: str = "fixed"
     loop: bool = True
     seed: int | None = None
-    engine: str = "pose"       # "pose" (khung xương + SD1.5) | "video" (WAN 2.2)
-    pose: str | None = None    # preset trong forge/poses.py (engine pose)
+    engine: str = "edit"       # "edit" (FLUX.2 klein) | "pose" (khung xương + SD1.5) | "video" (WAN 2.2)
+    pose: str | None = None    # preset trong forge/poses.py (engine edit/pose)
 
 
 @dataclass
@@ -97,7 +114,8 @@ class Settings:
     debug: bool = True
     char_height_explicit: bool = False  # jobs.json có khai báo char_height không
     palette_explicit: bool = False      # jobs.json có khai báo palette không
-    engine: str = "pose"
+    engine: str = "edit"
+    edit: dict = field(default_factory=lambda: dict(EDIT_DEFAULTS))
     pose: dict = field(default_factory=lambda: dict(POSE_DEFAULTS))
     wan: dict = field(default_factory=lambda: dict(WAN_DEFAULTS))
     jobs: list[Job] = field(default_factory=list)
@@ -136,6 +154,12 @@ def parse(raw: dict) -> Settings:
     s.char_height_explicit = raw.get("char_height") is not None
     s.palette_explicit = raw.get("palette") is not None
     s.wan = {**WAN_DEFAULTS, **(raw.get("wan") or {})}
+    s.edit = {**EDIT_DEFAULTS, **(raw.get("edit") or {})}
+    s.edit["size"] = _int(s.edit["size"], "edit.size")
+    if s.edit["size"] % 16 or not 256 <= s.edit["size"] <= 1536:
+        raise ConfigError("edit.size phải là bội của 16, trong khoảng 256..1536")
+    if not 0.1 <= float(s.edit["fallback_denoise"]) <= 1.0:
+        raise ConfigError("edit.fallback_denoise phải trong khoảng 0.1..1.0")
     s.pose = {**POSE_DEFAULTS, **(raw.get("pose") or {})}
     if s.pose["layout"] not in POSE_LAYOUTS:
         raise ConfigError(f"pose.layout phải là một trong {POSE_LAYOUTS}, đang là {s.pose['layout']!r}")
@@ -167,12 +191,21 @@ def parse(raw: dict) -> Settings:
             raise ConfigError(f"Trùng tên job: {parsed.name}")
         seen.add(parsed.name)
         s.jobs.append(parsed)
-    needs_sd = any(job.mode == "prompt" or any(a.engine == "pose" for a in job.actions)
-                   for job in s.jobs)
-    if needs_sd and not s.checkpoint:
+    if needs_sd(s) and not s.checkpoint:
         raise ConfigError("Cần khai báo \"checkpoint\" (SD1.5 pixel art, hoặc \"auto\"): có job "
-                          "mode \"prompt\" hoặc action dùng engine \"pose\" (SD vẽ từng frame)")
+                          "mode \"prompt\" với engine \"pose\"/\"video\", hoặc action dùng engine "
+                          "\"pose\" (SD vẽ từng frame). Engine \"edit\" mặc định không cần checkpoint.")
     return s
+
+
+def char_engine(s: Settings) -> str:
+    """Engine tạo nhân vật từ mô tả: "edit" = FLUX.2 klein, còn lại = SD1.5."""
+    return "edit" if s.engine == "edit" else "sd"
+
+
+def needs_sd(s: Settings) -> bool:
+    return any((job.mode == "prompt" and char_engine(s) == "sd")
+               or any(a.engine == "pose" for a in job.actions) for job in s.jobs)
 
 
 def _job(raw: dict, j: int, s: Settings) -> Job:
@@ -211,13 +244,13 @@ def _job(raw: dict, j: int, s: Settings) -> Job:
         if engine not in ENGINES:
             raise ConfigError(f"{aw} ({aname}): engine phải là một trong {ENGINES}")
         pose = None
-        if engine == "pose":
+        if engine in ("edit", "pose"):
             pose = str(act.get("pose", aname))
             if pose not in POSE_PRESETS:
                 raise ConfigError(
                     f"{aw} ({aname}): chưa có tư thế mẫu \"{pose}\". Có sẵn: "
                     f"{', '.join(POSE_PRESETS)}. Action tên khác thì thêm \"pose\": \"<tên có sẵn>\" "
-                    f"(VD \"slash2\" dùng \"pose\": \"attack\"), hoặc \"engine\": \"video\".")
+                    f"(VD \"slash2\" dùng \"pose\": \"attack\").")
         default_loop = POSE_PRESETS[pose]["loop"] if pose else True
         actions.append(Action(
             name=aname, prompt=str(act["prompt"]), frames=frames,

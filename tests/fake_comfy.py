@@ -7,6 +7,9 @@ Mô phỏng đúng các endpoint SpriteForge dùng: /system_stats, /object_info,
                  màu bị nhiễu nhẹ (để kiểm tra bước ép palette).
 - Graph bảng tư thế (SetLatentNoiseMask) -> giữ nguyên vùng đen của mặt nạ, vẽ nhân vật
   vào từng ô trắng theo khung xương của ô đó.
+- Graph FLUX.2 klein (Flux2Scheduler): không ảnh mẫu -> nhân vật nền trắng; có ảnh mẫu
+  -> trả lại ảnh 1 (con rối) như thể đã vẽ sạch. Prompt có "COPYREF" -> lỗi thật đã thấy:
+  model chép nguyên ảnh 2 (tư thế đứng), trừ khi chạy img2img (SetFirstSigma).
 - Prompt chứa "FAIL_ME" -> history trả lỗi execution_error; "GRIDOOM" -> chỉ graph bảng
   tư thế lỗi hết VRAM (để test đường lùi về vẽ từng frame).
 """
@@ -27,9 +30,9 @@ from forge import workflows
 
 MODELS = {
     "checkpoints": ["pixel_test.safetensors"],
-    "diffusion_models": ["wan2.2_ti2v_5B_fp16.safetensors"],
-    "text_encoders": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"],
-    "vae": ["wan2.2_vae.safetensors"],
+    "diffusion_models": ["wan2.2_ti2v_5B_fp16.safetensors", "flux-2-klein-4b-fp8.safetensors"],
+    "text_encoders": ["umt5_xxl_fp8_e4m3fn_scaled.safetensors", "qwen_3_4b.safetensors"],
+    "vae": ["wan2.2_vae.safetensors", "flux2-vae.safetensors"],
     "controlnet": ["control_v11p_sd15_openpose_fp16.safetensors"],
     "ipadapter": ["ip-adapter-plus_sd15.safetensors"],
     "clip_vision": ["CLIP-ViT-H-14-laion2B-s32B-b79K.safetensors"],
@@ -131,6 +134,26 @@ def fake_board(pose: Image.Image, init: Image.Image, mask: Image.Image, sprite: 
     return board
 
 
+def fake_klein(graph: dict, uploads: dict, texts: str) -> Image.Image:
+    seed = graph["8"]["inputs"]["noise_seed"]
+    rng = np.random.default_rng(seed)
+    refs = [graph[k]["inputs"]["image"] for k in sorted(
+        (k for k, n in graph.items() if n["class_type"] == "LoadImage" and k.isdigit()
+         and 20 <= int(k) < 100), key=int)]
+    if not refs:  # tạo nhân vật
+        img = fake_character(seed, bg="white", cut="CUTFEET" in texts)
+        if "EXTRAFIG" in texts:  # lỗi thật kiểu "character sheet": 2 nhân vật cạnh nhau
+            a = np.asarray(img).copy()
+            a[:, :160] = a[:, 176:336]
+            img = Image.fromarray(a)
+        return img
+    img2img = any(n["class_type"] == "SetFirstSigma" for n in graph.values())
+    src = uploads[refs[1] if "COPYREF" in texts and not img2img and len(refs) > 1 else refs[0]]
+    a = np.asarray(src.convert("RGB")).astype(np.int16)
+    a += rng.integers(-3, 4, a.shape, dtype=np.int16)  # model vẽ lại: màu lệch nhẹ
+    return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")
+
+
 def _sprite_from(image: Image.Image) -> Image.Image:
     """Nhân vật (RGBA, cắt sát) từ ảnh nền trơn: dùng cho ảnh mẫu IP-Adapter."""
     a = np.asarray(image.convert("RGB")).astype(np.int16)
@@ -140,9 +163,10 @@ def _sprite_from(image: Image.Image) -> Image.Image:
 
 
 class FakeComfy:
-    def __init__(self, ipadapter: bool = True, grid: bool = True):
+    def __init__(self, ipadapter: bool = True, grid: bool = True, klein: bool = True):
         self.ipadapter = ipadapter
         self.grid = grid
+        self.klein = klein
         self.uploads: dict[str, Image.Image] = {}
         self.files: dict[str, Image.Image] = {}
         self.history: dict[str, dict] = {}
@@ -175,7 +199,9 @@ class FakeComfy:
                                      "exception_message": "fake CUDA out of memory"}]]},
                 "outputs": {}}
             return pid
-        if "UNETLoader" in classes:
+        if "Flux2Scheduler" in classes:
+            images, out_node = [fake_klein(graph, self.uploads, texts)], workflows.KLEIN_OUTPUT
+        elif "UNETLoader" in classes:
             node = next(n for n in graph.values() if n["class_type"] == "Wan22ImageToVideoLatent")
             start = self.uploads[graph["4"]["inputs"]["image"]]
             seed = next(n for n in graph.values() if n["class_type"] == "KSampler")["inputs"]["seed"]
@@ -233,6 +259,8 @@ class FakeComfy:
                         nodes |= set(workflows.IPADAPTER_NODES)
                     if fake.grid:
                         nodes |= set(workflows.GRID_NODES)
+                    if fake.klein:
+                        nodes |= set(workflows.KLEIN_NODES)
                     return self._json({n: {} for n in nodes})
                 if url.path.startswith("/models/"):
                     return self._json(MODELS.get(url.path.split("/")[-1], []))

@@ -55,6 +55,9 @@ SOFTWARE.
 
 | Model | Giấy phép | Ghi chú |
 |---|---|---|
+| FLUX.2 [klein] 4B fp8 (`black-forest-labs/FLUX.2-klein-4b-fp8`) | Apache-2.0 | Engine edit (mặc định). Dùng thương mại được. Bản 9B là giấy phép phi thương mại: không dùng |
+| Qwen3 4B, bộ mã hoá chữ (`Comfy-Org/z_image_turbo`, `qwen_3_4b.safetensors`) | Apache-2.0 | Engine edit |
+| VAE FLUX.2 (`Comfy-Org/flux2-dev`, `flux2-vae.safetensors`) | VAE dùng chung cả họ FLUX.2; repo klein 4B (Apache-2.0) phát hành kèm cùng VAE ở `vae/` | Engine edit |
 | WAN 2.2 TI2V 5B (`Comfy-Org/Wan_2.2_ComfyUI_Repackaged`) | Apache-2.0 | Không hạn chế |
 | Checkpoint SD1.5 pixel art (Civitai) | Theo từng model | Đọc giấy phép trên trang model, nhất là khi dùng thương mại |
 | ControlNet v1.1 OpenPose fp16 (`comfyanonymous/ControlNet-v1-1_fp16_safetensors`) | OpenRAIL | Engine pose |

@@ -1,8 +1,12 @@
 """Ba bước của SpriteForge: nhân vật -> chuyển động -> sprite sheet.
 
-1. `generate_character`  SD1.5 pixel art txt2img (ý tưởng "anchor" của Pixel
-                         Art Studio, nhưng prompt rút gọn để vừa 77 token CLIP).
-2. `animate_video`       WAN 2.2 TI2V 5B: nhân vật + prompt hành động -> clip,
+1. `generate_character_edit`  FLUX.2 klein tạo nhân vật từ mô tả (engine "edit", mặc định).
+   `generate_character`       SD1.5 pixel art txt2img (engine "pose"/"video"; ý tưởng
+                              "anchor" của Pixel Art Studio).
+2. `animate_edit`        FLUX.2 klein vẽ lại "con rối" (sprite mẫu uốn theo khung xương)
+                         theo chính sprite mẫu (mặc định).
+   `animate_pose`        SD1.5 + ControlNet OpenPose + IP-Adapter theo khung xương.
+   `animate_video`       WAN 2.2 TI2V 5B: nhân vật + prompt hành động -> clip,
                          chọn N frame cách đều (luồng của Sprite Sheep).
 3. `finalize`            tách nền, về pixel gốc, ép palette, đặt vào ô đều nhau,
                          xuất spritesheet.png + manifest.json + preview.gif.
@@ -17,8 +21,9 @@ from pathlib import Path
 
 import numpy as np
 from PIL import Image
+from scipy import ndimage
 
-from . import cleanup, grid, matting, pixel, poses, sheet, workflows
+from . import cleanup, grid, matting, pixel, poses, puppet, sheet, workflows
 from .comfy import ComfyClient, ComfyError
 from .config import VIEWS, Action, Settings
 
@@ -69,6 +74,26 @@ GRID_NEGATIVE = ("different characters, inconsistent design, different clothes, 
                  "blurry, 3d render, realistic, photo, text, watermark, signature, scenery, "
                  "detailed background, gradient background, shadow, {other_view}")
 GRID_TIMEOUT_S = 1800  # bảng 3x3 ô 512px trên T4 ~2 phút; chừa rộng cho GPU đang bận
+
+
+# Engine edit (FLUX.2 klein): bộ mã hoá chữ là Qwen3 4B, đọc được câu dài tự nhiên.
+EDIT_VIEWS = {"side": "strict side view (profile), facing right",
+              "front": "front view, facing the viewer"}
+EDIT_CHAR_SIZE = (768, 1024)  # ảnh dọc, chừa chỗ quanh nhân vật
+EDIT_CHAR_PROMPT = ("Pixel art game sprite of {description}. Full body from head to feet, standing "
+                    "idle pose, {view}, a single character centered with empty space around it, "
+                    "plain pure white background, clean retro 16-bit pixel art with crisp pixels and "
+                    "a dark outline, no shadow, no ground, no text, no border.")
+# Ảnh 1 = con rối (đúng tư thế, khớp còn thô), ảnh 2 = sprite mẫu (đúng ngoại hình). Thử
+# thật: klein giữ rất chặt bố cục + tư thế của ảnh 1 -> ảnh 1 phải là con rối.
+EDIT_FRAME_PROMPT = (
+    "Image 1 is a rough animation frame of a 2D pixel art game character, made by cutting the "
+    "character from image 2 into body parts and rotating them into a new pose: {action}. Redraw "
+    "image 1 as a clean, finished pixel art sprite. Keep exactly the same pose, body position, "
+    "size and facing direction as image 1. Repair broken joints, gaps and stray pixels so the "
+    "anatomy looks natural. The character must look exactly like image 2: same design, outfit, "
+    "colors, proportions and weapon. {character}Single character, full body, {view}, plain pure "
+    "white background, no shadow, no ground, no text.")
 
 
 def resolve_seed(*candidates: int | None) -> int:
@@ -133,6 +158,70 @@ def generate_character(client: ComfyClient, cfg: Settings, description: str,
     # "cutout": nhân vật đã tách nền + làm sạch, dùng thay cho raw khi chuẩn bị sprite
     return raw, {"seed": s, "prompt": prompt, "negative": negative, "attempts": tries,
                  "cutout": cleaned}
+
+
+def _klein_models(cfg: Settings) -> dict:
+    return {k: cfg.edit[k] for k in ("unet", "text_encoder", "vae")}
+
+
+def _klein_draw(client: ComfyClient, cfg: Settings, prompt: str, seed: int, width: int,
+                height: int, **kw) -> Image.Image:
+    e = cfg.edit
+    graph = workflows.klein(_klein_models(cfg), prompt, seed, width, height, steps=int(e["steps"]),
+                            cfg=float(e["cfg"]), **kw)
+    files = client.run(graph, workflows.KLEIN_OUTPUT, timeout_s=float(e["timeout_s"]))
+    raw = client.fetch(files[0]).convert("RGB")
+    if float(np.asarray(raw).std()) < 2.0:
+        raise ComfyError("FLUX.2 klein trả về ảnh gần như một màu (đen/trống): lỗi fp16 trên GPU "
+                         "này? Xem kaggle/README.md mục 'Xử lý sự cố'.")
+    return raw
+
+
+def _main_figure(rgba: Image.Image, gap: float = 0.03) -> tuple[Image.Image, float]:
+    """Giữ mảng lớn nhất + mảng nằm sát nó (kiếm tách rời vài pixel); trả về (ảnh, tỉ lệ
+    pixel của phần giữ lại). Tỉ lệ thấp = ảnh có nhiều nhân vật / nhiều thứ rời nhau."""
+    a = np.asarray(rgba.convert("RGBA")).copy()
+    mask = a[:, :, 3] > 0
+    labels, n = ndimage.label(mask, structure=np.ones((3, 3), bool))
+    if n <= 1:
+        return Image.fromarray(a, "RGBA"), 1.0
+    sizes = ndimage.sum_labels(mask, labels, np.arange(1, n + 1))
+    main = labels == int(np.argmax(sizes)) + 1
+    near = ndimage.distance_transform_edt(~main) <= gap * a.shape[0]
+    keep_ids = np.unique(labels[near & mask])
+    keep = np.isin(labels, keep_ids[keep_ids > 0])
+    a[~keep] = 0
+    return Image.fromarray(a, "RGBA"), float(keep.sum() / mask.sum())
+
+
+def generate_character_edit(client: ComfyClient, cfg: Settings, description: str,
+                            seed: int | None = None) -> tuple[Image.Image, dict]:
+    """FLUX.2 klein tạo nhân vật từ mô tả, nền trắng. Nền không đều, nhân vật chạm mép hoặc
+    ảnh có nhiều nhân vật -> gen lại seed khác."""
+    prompt = EDIT_CHAR_PROMPT.format(description=description.strip().rstrip("."),
+                                     view=EDIT_VIEWS[cfg.view])
+    first = resolve_seed(seed, cfg.seed)
+    tries, best = [], None
+    for attempt in range(CHAR_ATTEMPTS):
+        s = first + attempt
+        raw = _klein_draw(client, cfg, prompt, s, *EDIT_CHAR_SIZE)
+        bg_ok, measured = matting.matches_key(raw, CHAR_BG)
+        figure, share = _main_figure(matting.cutout_flat(raw))
+        single, inside = share >= 0.85, not pixel.touches_edge(figure)
+        tries.append({"seed": s, "background": measured, "background_ok": bg_ok,
+                      "inside_frame": inside, "single": single})
+        score = bg_ok + inside + single
+        if best is None or score > best[0]:
+            best = (score, raw, s, figure)
+        if bg_ok and inside and single:
+            break
+        problems = ([] if bg_ok else [f"nền {measured} không phải nền trắng đều"]) + \
+                   ([] if inside else ["nhân vật bị cắt ở mép ảnh"]) + \
+                   ([] if single else [f"có nhiều nhân vật/mảng rời (nhân vật chính {share:.0%})"])
+        log.warning("Nhân vật lần %d (seed %d): %s -> %s", attempt + 1, s, "; ".join(problems),
+                    "thử seed khác" if attempt + 1 < CHAR_ATTEMPTS else "dùng ảnh tốt nhất")
+    _, raw, s, figure = best
+    return raw, {"engine": "edit", "seed": s, "prompt": prompt, "attempts": tries, "cutout": figure}
 
 
 def cutout(image: Image.Image) -> Image.Image:
@@ -276,6 +365,84 @@ def reference_image(native: Image.Image, size: int) -> Image.Image:
     canvas = Image.new("RGB", (size, size), (255, 255, 255))
     canvas.paste(up, (round(hip_x - up.width / 2), round(ground_y - up.height)), up)
     return canvas
+
+
+def animate_edit(client: ComfyClient, cfg: Settings, native: Image.Image,
+                 palette: np.ndarray, action: Action, description: str | None = None,
+                 seed: int | None = None, debug_dir: str | Path | None = None,
+                 ) -> tuple[list[Image.Image], pixel.VideoLayout, dict]:
+    """Engine edit: mỗi frame = FLUX.2 klein vẽ lại con rối (ảnh 1) theo sprite mẫu (ảnh 2).
+
+    Con rối (forge/puppet.py) đã đúng tư thế và đúng màu, chỉ còn thô ở khớp -> model chỉ
+    phải "sửa cho sạch", việc mà model sửa ảnh làm tốt nhất. Mỗi frame được kiểm tra: hình
+    bóng phải khớp con rối (không phải tư thế đứng của ảnh mẫu); không khớp thì vẽ lại kiểu
+    img2img từ chính con rối (`fallback_denoise`), tư thế khi đó chắc chắn đúng.
+    Mọi frame cùng seed, cùng chỗ đặt, cùng tỉ lệ xk -> thu về pixel gốc khớp đúng lưới.
+    """
+    e = cfg.edit
+    size = int(e["size"])
+    fit = 16 * math.ceil(max(native.height / poses.UNIT, native.width / 0.8) / 16)
+    if fit > size:  # sprite to hơn ảnh model vẽ: phóng x1 vẫn không vừa
+        log.warning("Sprite %dx%d quá lớn cho edit.size %d -> dùng %d", *native.size, size, fit)
+        size = fit
+    keys = poses.sequence(action.pose or action.name, action.frames)
+    seed = resolve_seed(action.seed, seed, cfg.seed)
+    rig = puppet.Rig(native, size)
+    pl = rig.pl
+    rest = np.asarray(rig.canvas)[:, :, 3] > 0
+    tag = uuid.uuid4().hex[:12]
+    ref_name = client.upload_image(puppet.on_white(rig.canvas), f"spriteforge_ref_{tag}.png")
+    character = f"The character: {description.strip().rstrip('.')}. " if description else ""
+    prompt = EDIT_FRAME_PROMPT.format(action=action.prompt.strip().rstrip("."),
+                                      character=character, view=EDIT_VIEWS[cfg.view])
+    attempts = (("edit", 1.0), ("img2img", float(e["fallback_denoise"])))
+    layout = pixel.VideoLayout(k=pl.k, width=size, height=size,
+                               center_x=pl.hip_x / pl.k, ground_y=pl.ground_y / pl.k)
+    frames, puppets, raws, cleans, checks = [], [], [], [], []
+    for i, key in enumerate(keys):
+        pup = rig.pose(key)
+        pup_mask = np.asarray(pup)[:, :, 3] > 0
+        pup_name = client.upload_image(puppet.on_white(pup), f"spriteforge_puppet_{tag}_{i}.png")
+        best = None
+        for mode, denoise in attempts:
+            raw = _klein_draw(client, cfg, prompt, seed, size, size,
+                              references=[pup_name, ref_name], init_image=pup_name, denoise=denoise)
+            cut = puppet.keep_near(matting.cutout_flat(raw), pup_mask, pl)
+            ok, follow, gain = puppet.follows_pose(np.asarray(cut)[:, :, 3] > 0, pup_mask, rest,
+                                                   pl.unit, float(e["follow_threshold"]))
+            cand = {"ok": ok, "follow": follow, "gain": gain, "mode": mode, "raw": raw, "cut": cut}
+            if best is None or (ok, follow) > (best["ok"], best["follow"]):
+                best = cand
+            if ok:
+                break
+        if not best["ok"]:
+            log.warning("%s frame %d: ảnh vẽ lại không khớp tư thế (khớp %.0f%%), dùng ảnh tốt nhất",
+                        action.name, i + 1, best["follow"] * 100)
+        checks.append({"mode": best["mode"], "follow": round(best["follow"], 3),
+                       "moved_covered": round(best["gain"], 3), "ok": best["ok"]})
+        frames.append(pixel.video_frame_to_native(best["cut"], layout, palette))
+        puppets.append(puppet.on_white(pup))
+        raws.append(best["raw"])
+        cleans.append(best["cut"])
+    if debug_dir:  # con rối (ảnh 1 đưa vào model) + ảnh model vẽ + sau tách nền, từng frame
+        debug_dir = Path(debug_dir)
+        debug_dir.mkdir(parents=True, exist_ok=True)
+        puppet.on_white(rig.canvas).save(debug_dir / "reference.png")
+        _strip(puppets, debug_dir / "puppet.png")
+        _strip(raws, debug_dir / "raw.png")
+        _strip([_on_gray(c) for c in cleans], debug_dir / "clean.png")
+    empty = sum(pixel.bbox(f) is None for f in frames)
+    if empty == len(frames):
+        raise ComfyError("Mọi frame đều trống sau khi tách nền: model không vẽ nhân vật trên nền "
+                         "trắng. Xem debug/raw.png.")
+    if empty:
+        log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
+    fallback = sum(c["mode"] != "edit" for c in checks)
+    if fallback:
+        log.info("%s: %d/%d frame phải vẽ lại kiểu img2img từ con rối", action.name, fallback,
+                 len(checks))
+    return frames, layout, {"engine": "edit", "pose": action.pose, "seed": seed, "prompt": prompt,
+                            "scale_k": pl.k, "frames": checks}
 
 
 def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,

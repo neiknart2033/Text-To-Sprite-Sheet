@@ -7,6 +7,10 @@
 **v2 (15/10/2026):** ghép hai dự án mã nguồn mở. Engine animation Phase 1 là
 **WAN 2.2 TI2V 5B (video)**, thay cho "grid img2img" của v1.
 
+**v7 (16/10/2026): engine mặc định đổi sang `edit`** (mục 4c): FLUX.2 [klein] 4B, model sửa
+ảnh theo ảnh mẫu, vẽ lại "con rối" (sprite mẫu uốn theo khung xương). Lý do: chạy thật với
+engine pose, đưa sprite mẫu vào vẫn ra nhân vật khác (IP-Adapter SD1.5 chỉ giữ "na ná").
+
 **v6 (16/10/2026): bảng tư thế** (mục 4b): cả action vẽ trong một ảnh, nhân vật mẫu giữ
 nguyên ở ô đầu -> frame nhất quán hơn vẽ lẻ.
 
@@ -34,6 +38,9 @@ Chạy pipeline text-to-sprite-sheet trên **Kaggle Notebooks GPU miễn phí**
 4. **Cần verify số điện thoại** mới bật được GPU + Internet.
 5. **Không UI web**: chạy headless `run_batch.py`.
 6. RAM ~30GB: đủ cho WAN 5B (~17GB file), **không** đủ cho MiniMax H3 (~39GB).
+7. Không bf16 nên model chỉ hỗ trợ bf16/fp32 trong ComfyUI (`supported_inference_dtypes` của
+   QwenImage, QwenImage21, Flux3, ZImage...) chạy fp32 trên T4: chậm gấp nhiều lần. Flux2
+   (FLUX.2 klein) và WAN hỗ trợ fp16.
 
 ## 3. Nguồn gốc code: ghép hai dự án
 
@@ -307,11 +314,67 @@ Chạy test local: `python -m unittest tests.test_forge -v` (không cần GPU).
 - Model: `control_v11p_sd15_openpose_fp16` (0.7GB), `ip-adapter-plus_sd15` (0.1GB),
   `CLIP-ViT-H-14-laion2B-s32B-b79K` (2.5GB) - cell 2 tìm trong Input theo tên, thiếu thì tải HF.
 
+## 4c. Engine `edit` (mặc định từ v7)
+
+**Chọn model (16/10/2026)**, đứng đầu bảng sửa ảnh open-weights (Artificial Analysis):
+
+| Model | Elo | Giấy phép | Trên T4 |
+|---|---|---|---|
+| Qwen-Image-2.1 (7B, 09/2026) | 1083 | Qwen Research: **cấm thương mại** | chỉ bf16/fp32 -> fp32, chậm |
+| HunyuanImage 3.0 Instruct | 1064 | | 80B MoE, không vừa |
+| FLUX.2 [klein] 9B | 1015 | FLUX non-commercial | fp16 được; 2 ComfyUI x (9B + Qwen3 8B) vượt RAM 30GB |
+| Qwen-Image-Edit 2511 (20B) | 991 | Apache-2.0 | chỉ bf16/fp32; PR fp16 (#12522) chưa merge |
+| **FLUX.2 [klein] 4B** (01/2026) | 937 | **Apache-2.0** | **fp16, 4 bước, 3.8GB fp8 + Qwen3 4B 7.5GB** |
+| FLUX.3 Image Klein (5.6B, 15/10/2026) | | Kommunity (< 5 triệu USD) | chỉ bf16/fp32, 16 bước |
+
+**Thử thật trên Space chính thức `black-forest-labs/FLUX.2-klein-4B`** (sprite ronin 36x64 phóng
+NEAREST lên 768, ảnh 1 = sprite đứng, ảnh 2 = ma-nơ-canh đang chạy/chém, prompt bảo vẽ theo
+ma-nơ-canh): nhân vật giữ **đúng y** (giáp, khăn đỏ, kiếm), nhưng **tư thế bị chép từ ảnh 1**
+(đứng). Kết luận: klein giữ rất chặt bố cục + tư thế của ảnh 1 -> ảnh 1 phải đã ở đúng tư thế.
+
+**Con rối** (`forge/puppet.py`):
+- `place`: phóng sprite NEAREST xk (k nguyên, nhân vật cao ~`poses.UNIT` cạnh ảnh), toạ độ là
+  bội của k (frame trả về thu lại xk là khớp đúng lưới pixel gốc, `VideoLayout(k=k)`); hông theo
+  trung vị cột của 35% dưới (vũ khí không kéo lệch); khung xương đặt theo chính sprite
+  (1 đơn vị = chiều cao sprite).
+- `Rig`: chia pixel theo khung xương `NEUTRAL`: trên cổ = đầu; cách xương tay gần <= 0.05 = tay
+  (cánh/cẳng theo xương gần hơn); dưới hông = chân (4 đoạn, theo xương gần nhất -> chân dính
+  nhau bị chia đôi); còn lại = thân. Chỗ tay rời đi được lấp màu thân gần nhất (không thì "tay
+  ma"). Tay xa = bản sao tay gần tối 70% (sprite nhìn ngang không có pixel tay xa).
+- `pose(key)`: mỗi phần xoay cứng quanh khớp đầu theo đoạn xương đích (PIL affine NEAREST), vẽ từ
+  sau ra trước: tay xa, chân xa, chân gần, thân, đầu, tay gần.
+- `follows_pose`: khớp hình bóng (min hai chiều "phần A nằm trong 0.04 đơn vị của B") >= 0.7 VÀ
+  "phần dời chỗ" (pixel con rối cách tư thế đứng > 0.04) được phủ >= 50%. Chỉ so hình bóng
+  không bắt được lỗi: giơ kiếm qua đầu chỉ đổi ~5% hình bóng. Kiểm trên ảnh thật của Space:
+  ảnh chép tư thế đứng bị loại.
+- `keep_near`: bỏ mảng xa con rối và vệt bóng dưới đường nền ngoài bàn chân.
+
+**Mỗi frame** (`pipelines.animate_edit`): upload con rối + sprite mẫu (cùng chỗ đặt) ->
+`workflows.klein` (UNETLoader + CLIPLoader `flux2` + VAELoader; `CLIPTextEncode` ->
+`ReferenceLatent` x2 (con rối, mẫu; negative = `ConditioningZeroOut` cũng gắn 2 ảnh);
+`CFGGuider` cfg 1; `Flux2Scheduler` 4 bước; `EmptyFlux2LatentImage`; `SamplerCustomAdvanced`
+euler) -> kiểm `follows_pose`; không đạt -> img2img: latent = VAEEncode(con rối),
+`SplitSigmasDenoise(fallback_denoise=0.7)`; chọn ảnh khớp nhất -> `cutout_flat` -> `keep_near`
+-> `video_frame_to_native` (thu xk, ép palette). Cùng seed mọi frame. ComfyUI cache
+`CLIPTextEncode`/`VAEEncode` ảnh mẫu giữa các frame cùng action.
+
+**Nhân vật** (mode prompt, `generate_character_edit`): klein text-to-image 768x1024, nền trắng;
+kiểm nền, chạm mép, "một nhân vật" (mảng lớn nhất + mảng sát nó >= 85%); tối đa 3 seed; chỉ giữ
+nhân vật chính.
+
+**Chưa đo trên T4.** Ước tính: 4B x 2 x ~6.9k token (3 ảnh 768²) ≈ 55 TFLOP + attention
+≈ 15 TFLOP/bước; T4 ~20–25 TFLOPS thực -> ~3s/bước -> ~12–20s/frame. RAM: mỗi ComfyUI giữ
+~11.6GB (klein fp8 3.8 + Qwen3 4B bf16 7.5 + VAE); 2 GPU ~23GB < 30GB (WAN 2 GPU ~31GB đã chạy
+được với `STAGGER_S`). Rủi ro: Flux2 fp16 trên T4 sinh NaN -> `_klein_draw` báo lỗi ảnh một màu,
+README hướng dẫn `COMFY_ARGS = "--bf16-unet"`.
+
+Hướng nâng cấp nếu chưa đạt: LoRA RefControl (thedeoxen, Apache-2.0) cho klein 4B **Base**
+(ảnh độ sâu + ảnh mẫu, ~50 bước + CFG -> chậm ~10 lần); LoRA pixel art cho klein 4B.
+
 ## 11. Phase 2 (chưa làm)
 
-- Engine pose: thêm ControlNet depth/lineart, LoRA nhân vật, thêm preset theo 21 trạng thái game.
-- Checkpoint SDXL pixel art + ControlNet OpenPose SDXL (xinsir) + IP-Adapter SDXL: bám prompt và
-  giải phẫu tốt hơn SD1.5, nhưng model ~10GB và chậm hơn ~3-4 lần trên T4.
+- Thêm preset tư thế theo 21 trạng thái game.
+- Engine edit: con rối hiểu tỉ lệ chibi (đầu to), vũ khí cầm tay đi theo cổ tay; LoRA RefControl.
 - Nhiều hướng nhìn (Pixel Art Studio có `direction_gen`: south/east/west/north).
 - Train LoRA riêng cho từng nhân vật để khoá identity.
 - Auto-push output lên HuggingFace Dataset sau mỗi batch.

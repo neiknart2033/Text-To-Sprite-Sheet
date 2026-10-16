@@ -18,7 +18,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "kaggle"))
 
-from forge import cleanup, comfy, config, matting, pipelines, pixel, poses, sheet, workflows  # noqa: E402
+from forge import (cleanup, comfy, config, matting, pipelines, pixel, poses, puppet, sheet,  # noqa: E402
+                   workflows)
 from tests.fake_comfy import FakeComfy, fake_character  # noqa: E402
 
 import run_batch  # noqa: E402
@@ -149,7 +150,7 @@ class UnitTests(unittest.TestCase):
             sheet.pack([Image.new("RGBA", (8, 8)), Image.new("RGBA", (9, 8))], 2)
 
     def test_config_errors(self):
-        good = {"checkpoint": "x.safetensors",
+        good = {"checkpoint": "x.safetensors", "engine": "pose",
                 "jobs": [{"name": "a", "mode": "prompt", "prompt": "knight",
                           "actions": [{"name": "idle", "prompt": "idle", "frames": 4}]}]}
         config.parse(json.loads(json.dumps(good)))
@@ -157,6 +158,8 @@ class UnitTests(unittest.TestCase):
         del bad["checkpoint"]
         with self.assertRaisesRegex(config.ConfigError, "checkpoint"):
             config.parse(bad)
+        del bad["engine"]  # engine "edit" mặc định: FLUX.2 klein, không cần checkpoint SD1.5
+        self.assertEqual(config.parse(bad).engine, "edit")
         bad = json.loads(json.dumps(good))
         bad["jobs"][0]["name"] = "có dấu"
         with self.assertRaisesRegex(config.ConfigError, "name"):
@@ -367,14 +370,18 @@ class EndToEndTests(unittest.TestCase):
             self.assertIn("bị cắt", (d / "o/run_log.txt").read_text(encoding="utf-8"))
             _close_log_handlers()
 
-    def test_example_jobs_parse_and_auto_checkpoint(self):
+    def test_example_jobs_parse_and_pass_preflight(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
-            for name in ("jobs.example.json", "jobs.bench.json"):
+            for name in ("jobs.example.json", "jobs.bench.json", "jobs.image.example.json"):
                 cfg = config.load(ROOT / "kaggle" / name)
-                self.assertEqual(cfg.checkpoint, "auto")
+                self.assertEqual(cfg.engine, "edit")
+                self.assertTrue(all(a.engine == "edit" and a.pose for j in cfg.jobs for a in j.actions))
                 problems = run_batch.preflight(comfy.ComfyClient(fake.url), cfg, Path(d), Path(d))
-                self.assertEqual(problems, [])
-                self.assertEqual(cfg.checkpoint_file, "pixel_test.safetensors")
+                if name == "jobs.image.example.json":  # chưa có hero.png
+                    self.assertEqual(len(problems), 1)
+                    self.assertIn("hero.png", problems[0])
+                else:
+                    self.assertEqual(problems, [])
 
     def test_preflight_reports_missing_model(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
@@ -421,15 +428,16 @@ class PoseEngineTests(unittest.TestCase):
         with self.assertRaisesRegex(config.ConfigError, "attack"):
             parse([{"name": "slash2", "prompt": "x"}])  # tên lạ -> gợi ý danh sách tư thế
         cfg = parse([{"name": "slash2", "prompt": "x", "pose": "attack"},
-                     {"name": "jump", "prompt": "x"}, {"name": "w", "prompt": "x", "engine": "video"}])
+                     {"name": "jump", "prompt": "x"}, {"name": "w", "prompt": "x", "engine": "video"}],
+                    engine="pose")
         acts = cfg.jobs[0].actions
         self.assertEqual((acts[0].engine, acts[0].pose, acts[0].loop), ("pose", "attack", False))
         self.assertEqual((acts[2].engine, acts[2].pose), ("video", None))
         with self.assertRaisesRegex(config.ConfigError, "engine"):
             parse([{"name": "idle", "prompt": "x"}], engine="gif")
         with self.assertRaisesRegex(config.ConfigError, "checkpoint"):  # ảnh mẫu + pose vẫn cần SD
-            config.parse({"jobs": [{"name": "a", "mode": "image", "character_image": "a.png",
-                                    "actions": [{"name": "idle", "prompt": "x"}]}]})
+            config.parse({"engine": "pose", "jobs": [{"name": "a", "mode": "image", "character_image": "a.png",
+                                                      "actions": [{"name": "idle", "prompt": "x"}]}]})
 
     def test_fill_defaults(self):
         graph = {"1": {"class_type": "IPAdapter", "inputs": {"weight_type": "standard", "weight": 0.8}},
@@ -448,7 +456,7 @@ class PoseEngineTests(unittest.TestCase):
         self.assertEqual(graph["2"]["inputs"]["ckpt_name"], "mine.safetensors")  # tên file: không đụng
 
     def _run(self, fake, d, actions, **extra):
-        jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 5,
+        jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 5, "engine": "pose",
                 "jobs": [{"name": "ronin", "prompt": "dark samurai", "actions": actions}], **extra}
         (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
         return run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")])
@@ -541,7 +549,7 @@ class PoseEngineTests(unittest.TestCase):
     def test_dirty_sd_output_gives_clean_single_character(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)
-            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 3,
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 3, "engine": "pose",
                     "jobs": [{"name": "r", "prompt": "DISKBG EXTRAFIG samurai",
                               "actions": [{"name": "attack", "prompt": "slash", "frames": 4}]}]}
             (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
@@ -610,8 +618,8 @@ class PoseEngineTests(unittest.TestCase):
             self.assertFalse(any("SetLatentNoiseMask" in json.dumps(g) for g in fake.prompts))
             self.assertIn("thiếu node", (d / "o/run_log.txt").read_text(encoding="utf-8"))
             _close_log_handlers()
-        base = {"checkpoint": "auto", "jobs": [{"name": "a", "prompt": "p",
-                                                "actions": [{"name": "idle", "prompt": "x"}]}]}
+        base = {"checkpoint": "auto", "engine": "pose", "jobs": [{"name": "a", "prompt": "p",
+                                                                  "actions": [{"name": "idle", "prompt": "x"}]}]}
         self.assertEqual(config.parse(base).pose["layout"], "grid")
         with self.assertRaisesRegex(config.ConfigError, "layout"):
             config.parse({**base, "pose": {"layout": "board"}})
@@ -625,6 +633,180 @@ class PoseEngineTests(unittest.TestCase):
             self.assertFalse(any("IPAdapter" in json.dumps(g) for g in fake.prompts))
             self.assertIn("Tắt IP-Adapter", (d / "o/run_log.txt").read_text(encoding="utf-8"))
             _close_log_handlers()
+
+
+class EditEngineTests(unittest.TestCase):
+    """Engine "edit" (mặc định): FLUX.2 klein vẽ lại con rối (forge/puppet.py)."""
+
+    @staticmethod
+    def _native():
+        native, _ = pipelines.prepare_character(fake_character(13), UnitTests._cfg())
+        return native
+
+    def test_puppet_rest_pose_is_the_sprite_itself(self):
+        rig = puppet.Rig(self._native(), 768)
+        self.assertEqual(rig.pl.size % rig.pl.k, 768 % rig.pl.k)
+        self.assertEqual((rig.pl.x0 % rig.pl.k, rig.pl.y0 % rig.pl.k), (0, 0))  # khớp lưới pixel gốc
+        rest, canvas = np.asarray(rig.pose(poses.NEUTRAL)), np.asarray(rig.canvas)
+        opaque = canvas[:, :, 3] > 0
+        self.assertTrue((rest[:, :, 3] > 0)[opaque].all())            # không mất pixel nào
+        same = (rest == canvas).all(2)[opaque].mean()
+        self.assertGreater(same, 0.97)  # chỉ khác chỗ tay xa (bản sao tối) ló ra sau lưng
+        self.assertTrue(all(rig.counts[p] > 0 for p in ("head", "torso", "na_up", "nl_lo", "fl_lo")))
+
+    def test_puppet_moves_limbs_and_score_rejects_standing_copy(self):
+        rig = puppet.Rig(self._native(), 768)
+        rest = np.asarray(rig.canvas)[:, :, 3] > 0
+        for name, i in (("attack", 2), ("heavy", 1), ("run", 0), ("death", 4)):
+            key = poses.PRESETS[name]["keys"][i]
+            pup = np.asarray(rig.pose(key))[:, :, 3] > 0
+            self.assertTrue(puppet.follows_pose(pup, pup, rest, rig.pl.unit)[0], name)
+            # lỗi thật: model chép nguyên tư thế đứng của ảnh mẫu -> phải bị bắt
+            self.assertFalse(puppet.follows_pose(rest, pup, rest, rig.pl.unit)[0], name)
+        # tư thế gần như đứng: ảnh giống tư thế đứng vẫn đạt
+        idle = np.asarray(rig.pose(poses.PRESETS["idle"]["keys"][1]))[:, :, 3] > 0
+        self.assertTrue(puppet.follows_pose(rest, idle, rest, rig.pl.unit)[0])
+        # chém: tay vươn ra trước xa hơn hẳn tư thế đứng
+        attack = np.asarray(rig.pose(poses.PRESETS["attack"]["keys"][2]))[:, :, 3] > 0
+        self.assertGreater(np.nonzero(attack.any(0))[0].max(), np.nonzero(rest.any(0))[0].max() + 20)
+
+    def test_klein_graph(self):
+        models = {"unet": "u.safetensors", "text_encoder": "t.safetensors", "vae": "v.safetensors"}
+        t2i = workflows.klein(models, "a knight", 7, 768, 1024)
+        kinds = {n["class_type"] for n in t2i.values()}
+        self.assertIn("EmptyFlux2LatentImage", kinds)
+        self.assertNotIn("ReferenceLatent", kinds)
+        self.assertEqual(t2i["2"]["inputs"]["type"], "flux2")
+        edit = workflows.klein(models, "redraw", 7, 768, 768, references=["pup.png", "ref.png"])
+        pos = edit["10"]["inputs"]["positive"]
+        chain = []
+        while pos[0] != "4":  # ReferenceLatent nối tiếp: ảnh 1 trước, ảnh 2 sau
+            node = edit[pos[0]]
+            chain.append(edit[edit[node["inputs"]["latent"][0]]["inputs"]["pixels"][0]]["inputs"]["image"])
+            pos = node["inputs"]["conditioning"]
+        self.assertEqual(chain[::-1], ["pup.png", "ref.png"])
+        i2i = workflows.klein(models, "redraw", 7, 768, 768, references=["pup.png", "ref.png"],
+                              init_image="pup.png", denoise=0.7)
+        # lịch 4 bước ở 768px = [1, .962, .895, .739, 0]: cắt ở .739 rồi đặt sigma đầu = 0.7
+        sched = workflows.flux2_schedule(4, 768, 768)
+        self.assertEqual([round(x, 3) for x in sched], [1.0, 0.962, 0.895, 0.739, 0.0])
+        self.assertEqual(i2i["14"]["inputs"]["step"], 3)
+        self.assertEqual(i2i["15"]["inputs"]["sigma"], 0.7)
+        self.assertEqual(i2i["11"]["inputs"]["sigmas"], ["15", 0])
+        self.assertEqual(i2i["11"]["inputs"]["latent_image"], ["21", 0])  # latent của con rối
+        i2i_85 = workflows.klein(models, "redraw", 7, 768, 768, init_image="pup.png", denoise=0.85)
+        self.assertEqual(i2i_85["14"]["inputs"]["step"], 2)  # [.85, .739, 0]
+        self.assertEqual(i2i_85["11"]["inputs"]["latent_image"], ["17", 0])  # ảnh init riêng
+        self.assertNotIn("6", i2i)
+        self.assertTrue(set(workflows.KLEIN_NODES) >= {n["class_type"] for n in i2i.values()})
+
+    def _run(self, fake, d, actions, job=None, **extra):
+        jobs = {"comfy_url": fake.url, "seed": 5, "frame_size": 128,
+                "jobs": [job or {"name": "ronin", "prompt": "dark samurai", "actions": actions}], **extra}
+        (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+        return run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")])
+
+    def test_edit_engine_end_to_end_without_sd_checkpoint(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            actions = [{"name": "idle", "prompt": "breathing", "frames": 4},
+                       {"name": "attack", "prompt": "slashing", "frames": 6, "columns": 3},
+                       {"name": "jump", "prompt": "jumping", "frames": 6}]
+            self.assertEqual(self._run(fake, d, actions), 0)
+            kinds = [{n["class_type"] for n in g.values()} for g in fake.prompts]
+            self.assertTrue(all("Flux2Scheduler" in k for k in kinds))
+            self.assertFalse(any("CheckpointLoaderSimple" in k for k in kinds))
+            self.assertNotIn("ReferenceLatent", kinds[0])           # nhân vật: tạo từ mô tả
+            self.assertEqual(len(fake.prompts), 1 + 4 + 6 + 6)     # mỗi frame một ảnh, không vẽ lại
+            frame_graph = fake.prompts[1]
+            refs = [frame_graph[k]["inputs"]["image"] for k in ("20", "24")]
+            self.assertIn("puppet", refs[0])
+            self.assertIn("ref", refs[1])
+            self.assertEqual(fake.uploads[refs[0]].size, (768, 768))
+            anchors = set()
+            for act, n, cols in (("idle", 4, 4), ("attack", 6, 3), ("jump", 6, 6)):
+                adir = d / "o/ronin" / act
+                m = json.loads((adir / "manifest.json").read_text(encoding="utf-8"))
+                self.assertEqual((m["frameCount"], m["columns"], m["frameWidth"]), (n, cols, 128))
+                self.assertEqual(m["meta"]["engine"], "edit")
+                self.assertTrue(all(f["ok"] and f["mode"] == "edit" for f in m["meta"]["frames"]))
+                anchors.add(json.dumps(m["anchor"]))
+                for f in ("puppet.png", "raw.png", "clean.png", "reference.png"):
+                    self.assertTrue((adir / "debug" / f).exists(), f)
+            self.assertEqual(len(anchors), 1)
+            sheet_img = Image.open(d / "o/ronin/jump/spritesheet.png")
+            tops = [sheet_img.crop((i * 128, 0, i * 128 + 128, 128)).getbbox()[1] for i in range(6)]
+            self.assertLess(min(tops[2:4]), tops[0] - 10)  # nhảy lên thật
+            _close_log_handlers()
+
+    def test_copied_standing_pose_falls_back_to_img2img(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            self.assertEqual(self._run(fake, d, [{"name": "attack", "prompt": "COPYREF slash", "frames": 5},
+                                                 {"name": "idle", "prompt": "COPYREF breathe", "frames": 2}]), 0)
+            m = json.loads((d / "o/ronin/attack/manifest.json").read_text(encoding="utf-8"))
+            modes = [f["mode"] for f in m["meta"]["frames"]]
+            self.assertGreaterEqual(modes.count("img2img"), 3)  # chém: chép tư thế đứng -> vẽ lại từ con rối
+            self.assertTrue(all(f["ok"] for f in m["meta"]["frames"]))
+            idle = json.loads((d / "o/ronin/idle/manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual([f["mode"] for f in idle["meta"]["frames"]], ["edit", "edit"])  # gần tư thế đứng: đạt
+            i2i = [g for g in fake.prompts if any(n["class_type"] == "SetFirstSigma" for n in g.values())]
+            self.assertEqual(len(i2i), modes.count("img2img"))
+            self.assertEqual(len(fake.prompts), 1 + 5 + 2 + len(i2i))
+            _close_log_handlers()
+
+    def test_user_sprite_keeps_pixels_and_palette(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            native = self._native()
+            pixel.upscale(native, 3).save(d / "hero.png")
+            job = {"name": "hero", "mode": "image", "character_image": "hero.png",
+                   "actions": [{"name": "walk", "prompt": "walking", "frames": 4}]}
+            self.assertEqual(self._run(fake, d, [], job=job), 0)
+            self.assertEqual(len(fake.prompts), 4)  # không tạo nhân vật, chỉ vẽ frame
+            colors = lambda im: {tuple(p) for p in np.asarray(im.convert("RGBA")).reshape(-1, 4) if p[3]}
+            sheet_img = Image.open(d / "o/hero/walk/spritesheet.png")
+            self.assertLessEqual(colors(sheet_img), colors(native))  # chỉ dùng màu của sprite mẫu
+            ref = fake.uploads[fake.prompts[0]["24"]["inputs"]["image"]]
+            self.assertEqual(colors(ref.convert("RGBA")) - {(255, 255, 255, 255)}, colors(native))
+            _close_log_handlers()
+
+    def test_preflight_reports_missing_klein_model(self):
+        from tests import fake_comfy
+        saved = fake_comfy.MODELS["text_encoders"]
+        fake_comfy.MODELS["text_encoders"] = ["umt5_xxl_fp8_e4m3fn_scaled.safetensors"]
+        try:
+            with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+                d = Path(d)
+                self.assertEqual(self._run(fake, d, [{"name": "idle", "prompt": "x", "frames": 2}]), 2)
+                self.assertEqual(fake.prompts, [])
+                self.assertIn("qwen_3_4b.safetensors", (d / "o/run_log.txt").read_text(encoding="utf-8"))
+                _close_log_handlers()
+        finally:
+            fake_comfy.MODELS["text_encoders"] = saved
+
+    def test_character_with_two_figures_is_regenerated(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            job = {"name": "r", "prompt": "EXTRAFIG samurai",
+                   "actions": [{"name": "idle", "prompt": "x", "frames": 2}]}
+            self.assertEqual(self._run(fake, d, [], job=job), 0)
+            info = json.loads((d / "o/r/character.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(info["attempts"]), pipelines.CHAR_ATTEMPTS)
+            self.assertFalse(any(t["single"] for t in info["attempts"]))
+            char = Image.open(d / "o/r/character.png")
+            self.assertLess(char.width, char.height * 0.9)  # chỉ giữ một nhân vật
+            _close_log_handlers()
+
+    def test_edit_config_validation(self):
+        base = {"jobs": [{"name": "a", "prompt": "p", "actions": [{"name": "idle", "prompt": "x"}]}]}
+        cfg = config.parse(base)
+        self.assertEqual((cfg.engine, cfg.edit["size"], cfg.jobs[0].actions[0].pose), ("edit", 768, "idle"))
+        with self.assertRaisesRegex(config.ConfigError, "edit.size"):
+            config.parse({**base, "edit": {"size": 700}})
+        with self.assertRaisesRegex(config.ConfigError, "attack"):
+            config.parse({"jobs": [{"name": "a", "prompt": "p",
+                                    "actions": [{"name": "slash2", "prompt": "x"}]}]})
 
 
 if __name__ == "__main__":

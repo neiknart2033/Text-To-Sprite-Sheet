@@ -1,26 +1,35 @@
 # SpriteForge trên Kaggle: hướng dẫn sử dụng
 
-Gõ mô tả nhân vật và danh sách hành động. Kaggle GPU (miễn phí) sẽ tạo cho mỗi
-hành động: `spritesheet.png` + `manifest.json` + `preview.gif`.
+Gõ mô tả nhân vật (hoặc đưa sprite có sẵn) và danh sách hành động. Kaggle GPU (miễn phí)
+sẽ tạo cho mỗi hành động: `spritesheet.png` + `manifest.json` + `preview.gif`.
 
-Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`):
+Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`), engine mặc định `"edit"` dùng
+**FLUX.2 [klein] 4B** (Black Forest Labs, 01/2026, Apache-2.0), một model **sửa ảnh theo
+ảnh mẫu**:
 
-1. **Nhân vật:** checkpoint SD1.5 pixel art vẽ nhân vật đứng nhìn ngang trên nền trắng (theo
-   khung xương đứng). Hoặc dùng sprite có sẵn của bạn. Sau đó tách nền, thu về pixel gốc,
-   rút palette màu.
-2. **Chuyển động (engine `pose`, mặc định):** mỗi action có sẵn một chuỗi **khung xương tư
-   thế** (đi, chạy, chém, nhảy...). SD1.5 vẽ nhân vật theo đúng các khung xương đó
-   (ControlNet OpenPose), dùng ảnh nhân vật làm mẫu để giữ ngoại hình (IP-Adapter). Vì
-   khung xương cố định tỉ lệ và đường nền nên nhân vật không bị zoom, trôi hay biến mất,
-   và số frame luôn đúng.
-   **Bảng tư thế** (mặc định): cả action được vẽ trong **một ảnh lưới**. Ô đầu là nhân vật
-   mẫu, giữ nguyên suốt quá trình vẽ; các ô sau là từng frame. SD nhìn thấy nhân vật mẫu
-   ngay cạnh nên vẽ mọi frame giống nhau hơn nhiều so với vẽ từng frame riêng lẻ.
-3. **Hậu xử lý:** tách nền, đưa về pixel gốc, ép đúng palette của nhân vật,
-   đặt vào các ô vuông cùng kích thước, rồi xuất sheet, manifest và GIF.
+1. **Nhân vật:** klein vẽ nhân vật đứng nhìn ngang trên nền trắng từ mô tả của bạn. Hoặc
+   dùng sprite có sẵn. Sau đó tách nền, thu về pixel gốc, rút palette màu.
+2. **Chuyển động:** mỗi action có sẵn một chuỗi **khung xương tư thế** (đi, chạy, chém,
+   nhảy...). Với mỗi frame:
+   - **Con rối:** chính sprite mẫu được cắt thành đầu, thân, tay, chân rồi xoay theo khung
+     xương của frame (`forge/puppet.py`). Ảnh này đúng tư thế, đúng màu, nhưng khớp còn thô.
+   - **Vẽ lại:** klein nhận ảnh 1 = con rối, ảnh 2 = sprite mẫu, và vẽ lại con rối cho sạch
+     mà vẫn giữ nguyên tư thế, ngoại hình theo sprite mẫu.
+   - **Kiểm tra:** hình bóng ảnh vẽ lại phải khớp con rối. Nếu model "lười", chép lại tư
+     thế đứng của ảnh mẫu, tool tự vẽ lại kiểu img2img từ chính con rối, khi đó tư thế
+     chắc chắn đúng.
+3. **Hậu xử lý:** tách nền, thu về pixel gốc **đúng lưới** của sprite mẫu, ép đúng palette
+   của nhân vật, đặt vào các ô cùng kích thước, rồi xuất sheet, manifest và GIF.
 
-Engine cũ `"engine": "video"` (WAN 2.2 tạo clip rồi cắt frame) vẫn dùng được, nhưng chạy
-thật cho thấy WAN hay làm nhân vật pixel nhỏ bị zoom, biến hình hoặc tan biến.
+Vì sao đổi sang klein: engine cũ (SD1.5 + ControlNet + IP-Adapter) vẽ lại nhân vật từ đầu
+mỗi frame, IP-Adapter chỉ giữ được "na ná", nên đưa sprite mẫu vào vẫn ra nhân vật khác.
+Model sửa ảnh nhìn trực tiếp vào sprite mẫu khi vẽ. Các model mạnh hơn (Qwen-Image-2.1,
+FLUX.3 klein, Qwen-Image-Edit 20B) cần GPU có bf16 (từ RTX 30xx/A100); T4 của Kaggle không
+có nên phải chạy fp32, chậm gấp nhiều lần, và một số còn cấm dùng thương mại. FLUX.2 klein 4B
+chạy fp16 được trên T4, chỉ cần 4 bước, và được dùng thương mại.
+
+Engine cũ vẫn dùng được: `"engine": "pose"` (SD1.5 + ControlNet OpenPose + IP-Adapter, cần
+checkpoint SD1.5) và `"engine": "video"` (WAN 2.2, xem mục 9).
 
 ---
 
@@ -30,27 +39,19 @@ thật cho thấy WAN hay làm nhân vật pixel nhỏ bị zoom, biến hình h
 Vào kaggle.com → avatar → **Settings** → *Phone verification*. Chưa verify thì
 không bật được GPU và Internet.
 
-### 1.2 Dataset model `spriteforge-models`
-1. Tải về máy một checkpoint **SD1.5** pixel art dạng `.safetensors` (2–4GB),
-   ví dụ `aziibpixelmix`, `PixelMonster` hoặc `Pixel Art Sprite Diffusion` trên Civitai.
-2. kaggle.com → **Datasets** → **New Dataset** → upload file → đặt tên
-   `spriteforge-models` → chọn **Private** → Create.
-### 1.2b Notebook `SpriteForge Models` (làm 1 lần, khỏi tải model mỗi session)
-Mặc định notebook này lưu model của engine tư thế (~3.3GB): ControlNet OpenPose, IP-Adapter Plus,
-CLIP-ViT-H. Đặt `INCLUDE_WAN = True` nếu cần cả WAN (~17GB) cho engine video. Bỏ qua bước
-này thì cell 2 của notebook chính tự tải các model engine tư thế mỗi session (vài phút).
-Không cần upload từ máy bạn: Kaggle tự tải từ HuggingFace về rồi lưu lại.
+### 1.2 (Tuỳ chọn) Notebook `SpriteForge Models`: khỏi tải model mỗi session
+Cell 2 của notebook chính tự tải 3 file FLUX.2 klein (~11.6GB) từ HuggingFace mỗi session
+(vài phút). Muốn lưu sẵn trên Kaggle:
 1. **Code** → **New Notebook** → *File → Import Notebook* → chọn `kaggle/SpriteForge_Models.ipynb`.
 2. *Session options*: **Accelerator = None** (chỉ dùng CPU, không tốn quota GPU), **Internet = On**.
 3. *Save Version* → **Save & Run All (Commit)**. Chờ khoảng 5–15 phút đến khi version báo chạy xong.
-   Output của nó sẽ có 3 file: `wan2.2_ti2v_5B_fp16.safetensors` (9.3GB),
-   `umt5_xxl_fp8_e4m3fn_scaled.safetensors` (6.3GB), `wan2.2_vae.safetensors` (1.3GB).
+   Output sẽ có `flux-2-klein-4b-fp8.safetensors` (3.8GB), `qwen_3_4b.safetensors` (7.5GB),
+   `flux2-vae.safetensors` (0.3GB).
+4. Đã từng chạy notebook này (bản cũ chỉ có ControlNet/IP-Adapter hoặc WAN)? Import bản mới
+   rồi Commit lại: nó tự xoá file không dùng để không vượt giới hạn Output 20GB.
 
-Bỏ qua bước này thì notebook chính vẫn chạy được, nhưng mỗi session sẽ tự tải lại 17GB.
-
-Notebook tự tìm mọi file `.safetensors` trong các dataset đã gắn, nên tên thư
-mục bên trong dataset không quan trọng. Chỉ để checkpoint trong dataset này,
-**không** để LoRA, vì mọi file `.safetensors` khác 3 file WAN đều bị coi là checkpoint.
+`INCLUDE_POSE_SD = True` thêm model engine cũ "pose" (~3.3GB); `INCLUDE_WAN = True` thêm WAN
+(~17GB, không bật cùng klein vì vượt 20GB).
 
 ### 1.3 Đưa code SpriteForge lên Kaggle (chọn 1 cách)
 - **Cách A (không cần GitHub):** nén cả thư mục dự án (có `forge/` và `kaggle/`)
@@ -70,15 +71,21 @@ mục bên trong dataset không quan trọng. Chỉ để checkpoint trong datas
 2. Panel phải → *Session options*: **Accelerator: GPU T4 x2**, **Internet: On**.
    Có 2 GPU thì notebook chạy 2 ComfyUI song song, mỗi GPU một cái, nên nhanh gần gấp đôi.
    Tránh P100 vì chậm với fp16.
-3. **Add Input** → chọn `spriteforge-models`, notebook **SpriteForge Models** (tab *Notebooks* /
-   *Your Work*), và `spriteforge-code` nếu dùng cách A.
+3. **Add Input** (tuỳ chọn): notebook **SpriteForge Models** (tab *Notebooks* / *Your Work*),
+   dataset chứa sprite mẫu của bạn, và `spriteforge-code` nếu dùng cách A.
+
+Notebook cũ (đã import trước bản FLUX.2 klein) vẫn chạy được: cell 2 lấy code mới qua
+`git pull`, nhưng **danh sách model cần tải nằm trong chính cell 2**, nên hãy import lại
+notebook (hoặc chép cell 1–3 từ `kaggle/SpriteForge_Kaggle.ipynb`). Nội dung `jobs.json` cũ ở
+cell 5 giữ nguyên được: `checkpoint`, `steps`, `cfg_scale`, `wan` bị bỏ qua với engine "edit".
 
 ---
 
 ## 2. Chạy
 
 **Lần đầu**, đặt `RUN_BENCHMARK = True` ở cell 1 và chạy tương tác (Run All).
-Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch thật sẽ mất bao lâu.
+Cell 4 tạo thử 1 nhân vật + 1 action chém 6 frame và in thời gian (`/kaggle/working/bench`),
+để bạn biết batch thật sẽ mất bao lâu và xem chất lượng trước.
 
 **Chạy batch:**
 1. Sửa nội dung `jobs.json` ở **cell 5** (xem mục 3).
@@ -102,7 +109,7 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 
 ```json
 {
-  "checkpoint": "auto",
+  "engine": "edit",
   "seed": -1,
   "frame_size": 128,
   "char_height": 64,
@@ -136,55 +143,60 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 
 | Trường | Mặc định | Ý nghĩa |
 |---|---|---|
-| `checkpoint` | (bắt buộc nếu có job `prompt`) | Tên file checkpoint SD1.5, hoặc `"auto"` để lấy file đầu tiên tìm thấy |
+| `engine` | `"edit"` | `"edit"` (FLUX.2 klein), `"pose"` (SD1.5 + ControlNet, engine cũ), `"video"` (WAN 2.2). Có thể đặt riêng cho từng action |
 | `seed` | `-1` | `-1` = ngẫu nhiên. Seed thực tế được ghi trong `manifest.json` để tái lập |
-| `steps`, `cfg_scale` | `30`, `7` | Tham số SD1.5 khi tạo nhân vật |
 | `frame_size` | `128` | Cạnh mỗi ô trong sheet (px). Mọi frame đúng bằng cỡ này |
-| `char_height` | `frame_size/2` | Chiều cao nhân vật tính bằng pixel gốc |
+| `char_height` | `frame_size/2` | Chiều cao nhân vật tính bằng pixel gốc (mode `prompt`) |
 | `palette` | `32` | Số màu tối đa. Mọi frame dùng chung palette của nhân vật |
 | `fps` | `10` | FPS ghi vào manifest và GIF |
-| `view` | `"side"` | `"side"` (nhìn ngang, quay phải) hoặc `"front"` |
-| `bg_color` | `"auto"` | Màu nền của canvas đưa vào WAN (nhân vật SD luôn vẽ nền trắng). `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
+| `view` | `"side"` | `"side"` (nhìn ngang, quay phải). Thư viện tư thế chỉ có góc nhìn ngang |
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
-| `engine` | `"pose"` | `"pose"` (khung xương + SD1.5) hoặc `"video"` (WAN 2.2). Có thể đặt riêng cho từng action |
-| `pose` | xem dưới | `strength` (1.0: độ bám khung xương), `ipadapter` (true), `ipadapter_weight` (0.8: độ giống nhân vật mẫu; cao quá thì tư thế kém đúng), `size` (512: cạnh một ô), `layout` (`"grid"`: bảng tư thế, cả action trong một ảnh; `"single"`: từng frame một ảnh, cách cũ), `grid_max_cells` (9: số ô tối đa một bảng kể cả ô mẫu; action dài hơn được chia thành nhiều bảng) |
-| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `board.png` (nguyên bảng tư thế SD vẽ) + `poses.png` (khung xương) + `raw.png` (từng frame SD gốc) + `clean.png` (sau khi làm sạch); engine video có `input.png` + `clip.gif` |
-| `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
+| `edit` | xem dưới | Tham số engine edit |
+| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/` (mục 4) |
+| `checkpoint`, `steps`, `cfg_scale`, `pose`, `wan`, `bg_color` | | Chỉ cho engine cũ, xem mục 9 |
+
+**`edit`** (thường không cần đổi):
+
+| Khoá | Mặc định | Ý nghĩa |
+|---|---|---|
+| `size` | `768` | Cạnh ảnh model vẽ mỗi frame (bội của 16). Nhỏ hơn (VD 640) thì nhanh hơn, chi tiết kém hơn |
+| `steps`, `cfg` | `4`, `1.0` | Bản klein distilled được huấn luyện cho 4 bước, cfg 1 |
+| `fallback_denoise` | `0.7` | Khi phải vẽ lại kiểu img2img: phần ảnh con rối bị vẽ lại (0.7 = giữ 30%). Thấp hơn: giữ tư thế chắc hơn nhưng khớp thô còn lộ; cao hơn: sạch hơn nhưng dễ lệch tư thế |
+| `follow_threshold` | `0.7` | Độ khớp hình bóng tối thiểu với con rối để nhận ảnh |
+| `unet`, `text_encoder`, `vae` | 3 file klein 4B | Tên file model |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
 `prompt`) hoặc `"image"` (cần `character_image`); `seed` (tùy chọn); `actions`.
 
 ### Dùng sprite mẫu có sẵn (`mode: "image"`)
-Không cần checkpoint SD: tool lấy thẳng nhân vật trong ảnh của bạn rồi tạo các action.
-Mẫu đầy đủ: `kaggle/jobs.image.example.json`.
+Tool lấy thẳng nhân vật trong ảnh của bạn rồi tạo các action. Mẫu đầy đủ:
+`kaggle/jobs.image.example.json`.
 1. **Chuẩn bị ảnh**: PNG **nền trong suốt** (tốt nhất) hoặc nền **một màu phẳng**. Một nhân
-   vật, đứng, nhìn ngang quay phải (khớp `"view": "side"`). Ảnh pixel gốc hoặc đã phóng
-   to đều được: ảnh phóng x2, x4... tự được thu về pixel gốc.
+   vật, **đứng thẳng, hai tay buông** (dễ cắt thành con rối nhất), nhìn ngang quay phải. Ảnh
+   pixel gốc hoặc đã phóng to đều được: ảnh phóng x2, x4... tự được thu về pixel gốc.
 2. **Upload lên Kaggle**: trong notebook → **Add Input** → **Upload** (hoặc *New Dataset*) →
    kéo thả file PNG (nhiều nhân vật thì kéo nhiều file) → đặt tên dataset, ví dụ `my-sprites` → Create.
 3. **Ghi vào `jobs.json`** (cell 5): `"character_image": "hero.png"`. **Chỉ cần tên file**: tool tự
-   tìm trong mọi Input đã gắn. Thêm `"prompt"` mô tả nhân vật (tiếng Anh) để WAN hiểu
-   đúng nhân vật hơn (không bắt buộc).
+   tìm trong mọi Input đã gắn. Nên thêm `"prompt"` mô tả nhân vật (tiếng Anh, VD "a knight in
+   silver armor with a red cape and a long sword") để model biết chi tiết nào là gì.
 4. Chạy cell 6 như bình thường.
 
-Tool giữ nguyên sprite của bạn: không ép về `char_height`, giữ mọi màu gốc (tối đa 255).
-Chỉ thu nhỏ khi nhân vật cao hơn 80% `frame_size`; khi đó hãy tăng `frame_size`
-(VD sprite cao 100px → `"frame_size": 160`). Muốn ép cỡ hoặc số màu thì khai báo rõ
-`char_height`, `palette`. Upload bản sửa của ảnh (cùng tên) rồi chạy lại → tool tự nhận
-ra và làm lại.
+Tool giữ nguyên sprite của bạn: không ép về `char_height`, giữ mọi màu gốc (tối đa 255), mọi
+frame chỉ dùng màu của sprite mẫu. Chỉ thu nhỏ khi nhân vật cao hơn 80% `frame_size`; khi đó
+hãy tăng `frame_size` (VD sprite cao 100px → `"frame_size": 160`). Upload bản sửa của ảnh
+(cùng tên) rồi chạy lại → tool tự nhận ra và làm lại.
 
 **Mỗi action:**
 
 | Trường | Mặc định | Ý nghĩa |
 |---|---|---|
-| `name`, `prompt` | bắt buộc | Tên thư mục; câu mô tả động tác **bằng tiếng Anh** |
-| `pose` | `= name` | Tư thế mẫu (engine pose). Có sẵn: `idle`, `walk`, `run`, `attack`, `heavy`, `hurt`, `jump`, `death`, `block`, `dash`, `crouch`, `fall`, `cast`, `kick`, `punch`. Action tên khác thì ghi rõ, VD `{"name": "slash2", "pose": "attack", ...}` |
-| `engine` | theo `engine` chung | `"pose"` hoặc `"video"` cho riêng action này |
+| `name`, `prompt` | bắt buộc | Tên thư mục; câu mô tả động tác **bằng tiếng Anh** (đưa vào prompt của model) |
+| `pose` | `= name` | Tư thế mẫu. Có sẵn: `idle`, `walk`, `run`, `attack`, `heavy`, `hurt`, `jump`, `death`, `block`, `dash`, `crouch`, `fall`, `cast`, `kick`, `punch`. Action tên khác thì ghi rõ, VD `{"name": "slash2", "pose": "attack", ...}` |
+| `engine` | theo `engine` chung | Engine riêng cho action này |
 | `frames` | `8` | Số frame trong sheet (1–64) |
 | `columns` | `= frames` | Số cột (mặc định 1 hàng) |
-| `duration` | `wan.duration` | (engine video) Độ dài clip (giây) |
-| `align` | `"fixed"` | `fixed` giữ nguyên vị trí thật (nhảy, chém). `track` bỏ phần trôi ngang (engine video) |
-| `loop` | `true` | Ghi vào manifest |
+| `align` | `"fixed"` | `fixed` giữ nguyên vị trí thật (nhảy, chém). `track` bỏ phần trôi ngang |
+| `loop` | theo tư thế | Ghi vào manifest |
 | `seed` | theo job | Seed riêng cho action |
 
 ---
@@ -197,17 +209,23 @@ output/
 └── hac_ronin/
     ├── character.png            nhân vật ở pixel gốc (dùng lại cho mọi action)
     ├── character_preview.png    bản phóng to để xem
-    ├── character_raw.png        ảnh gốc SD1.5 (mode prompt)
+    ├── character_raw.png        ảnh gốc model vẽ (mode prompt)
     ├── character.json           seed, prompt, kích thước, số màu
     ├── progress.json            trạng thái từng action (done / error + lý do)
     └── idle/
         ├── spritesheet.png      frame_size x frame_size mỗi ô, nền trong suốt
         ├── manifest.json        kích thước, số cột/hàng, fps, anchor, toạ độ từng frame, seed...
         ├── preview.gif
-        └── debug/               (khi "debug": true) input.png + clip.gif gốc của WAN
+        └── debug/               (khi "debug": true)
+            ├── reference.png    ảnh 2: sprite mẫu đưa vào model
+            ├── puppet.png       ảnh 1: con rối từng frame
+            ├── raw.png          ảnh model vẽ lại, từng frame
+            └── clean.png        sau khi tách nền
 ```
 
-`manifest.json` có `anchor` (điểm chân nhân vật trong ô) để engine game căn sprite.
+`manifest.json` có `anchor` (điểm chân nhân vật trong ô) để engine game căn sprite, và
+`meta.frames`: với mỗi frame, ảnh được vẽ kiểu nào (`edit` hoặc `img2img`) và độ khớp
+với con rối (`follow`).
 
 ---
 
@@ -215,10 +233,12 @@ output/
 
 - **Không ưng nhân vật?** Đặt `"seed"` khác cho job rồi chạy lại cell 6. Nhân vật và mọi
   action của job đó tự làm lại. Hoặc chọn một `character.png` ưng ý từ lần trước và dùng `mode: "image"`.
+- **Frame sai tư thế:** mở `debug/puppet.png`. Con rối sai (tay/chân lấy nhầm phần) thường do
+  sprite mẫu không đứng thẳng hai tay buông: dùng sprite đứng thẳng. Con rối đúng mà
+  `raw.png` sai: giảm `edit.fallback_denoise` (VD 0.55) hoặc tăng `edit.follow_threshold` (VD 0.8).
+- **Frame còn thô ở khớp tay/chân:** tăng `edit.fallback_denoise` (VD 0.8).
 - **Đi/chạy bị trôi khỏi khung:** viết "in place" trong prompt và đặt `"align": "track"`.
-- **Nhân vật có màu trùng nền** (VD áo xanh lá): giữ `bg_color: "auto"` hoặc đặt `"magenta"`.
 - **Nhân vật bị cắt** (log báo "pixel bị cắt"): tăng `frame_size` hoặc giảm `char_height`.
-- **Động tác lặp lại / đứng im ở cuối:** giảm `wan.useful_fraction` (VD 0.7) hoặc giảm `duration`.
 
 ---
 
@@ -226,23 +246,15 @@ output/
 
 | Thông báo | Cách xử lý |
 |---|---|
-| `Tắt IP-Adapter (...)` | Thiếu custom node hoặc model IP-Adapter: engine pose vẫn chạy nhưng nhân vật kém giống nhau giữa các frame. Xem cell 2 có tải đủ `ip-adapter-plus_sd15` và `CLIP-ViT-H-14...` không |
+| `Thiếu: model 'flux-2-klein-4b-fp8.safetensors'` (hoặc `qwen_3_4b`, `flux2-vae`) | Cell 2 của notebook là bản cũ: import lại `kaggle/SpriteForge_Kaggle.ipynb` (mục 1.4), chạy lại cell 2 rồi cell 3 |
+| `Thiếu: node ComfyUI 'Flux2Scheduler'` (hoặc `ReferenceLatent`, `EmptyFlux2LatentImage`) | ComfyUI quá cũ: để `COMFY_REF = ""` ở cell 1 để dùng bản mới nhất |
+| `FLUX.2 klein trả về ảnh gần như một màu (đen/trống)` | fp16 tràn số trên T4: ở cell 1 đặt `COMFY_ARGS = "--bf16-unet"` (chậm hơn) rồi chạy lại cell 3 và cell 6 |
+| `frame N: ảnh vẽ lại không khớp tư thế` | Cả hai cách vẽ đều lệch: xem mục 5 "Frame sai tư thế" |
+| `N/M frame phải vẽ lại kiểu img2img` | Bình thường: model chép tư thế đứng ở các frame đó nên tool vẽ lại từ con rối (tốn thêm thời gian) |
+| `Nhân vật lần N: có nhiều nhân vật/mảng rời` | Model vẽ nhiều nhân vật, tool tự gen lại (tối đa 3 lần) và chỉ giữ nhân vật lớn nhất |
 | `chưa có tư thế mẫu "..."` | Tên action không trùng tư thế có sẵn: thêm `"pose": "<tên có sẵn>"` vào action đó |
-| `SD vẽ thêm nhân vật/phông nền (đã tự xoá)` | Checkpoint hay vẽ nhiều nhân vật kiểu bảng thiết kế, đĩa tròn sau lưng, vệt đất. Tool tự xoá theo khung xương và thử seed khác để có nhân vật mẫu sạch. Xem `character_preview.png`; vẫn bẩn thì đổi `seed` của job |
-| Frame còn sót mảng màu sau lưng | Mở `debug/clean.png` (frame sau khi làm sạch) so với `debug/raw.png`. Thường do nhân vật mẫu còn bẩn: đổi `seed` của job |
-| Nhân vật sai tư thế / sai hướng (engine pose) | Mở `debug/poses.png` (khung xương) và `debug/raw.png` (ảnh SD gốc). Nhân vật không theo khung xương: tăng `pose.strength` (VD 1.2) hoặc giảm `pose.ipadapter_weight` (VD 0.6) |
-| Nhân vật khác nhau giữa các frame (engine pose) | Kiểm tra `manifest.json` có `"layout": "grid"` (nếu là `"single"` thì bảng tư thế đã lỗi, xem log). Tăng `pose.ipadapter_weight` (VD 0.9–1.0), viết `prompt` của job mô tả rõ màu sắc và trang phục |
-| `Vẽ bảng tư thế lỗi (...) -> vẽ từng frame` | Bảng lỗi (thường do hết VRAM) nên tool tự vẽ từng frame, action vẫn xong. Muốn dùng bảng: đặt `"pose": {"grid_max_cells": 5}` (bảng nhỏ hơn) |
-| `ComfyUI thiếu node ... vẽ từng frame thay cho bảng tư thế` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |
-| `Thiếu: node ComfyUI 'Wan22ImageToVideoLatent'` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |
-| `Thiếu: model '...' trong checkpoints/` | Tên trong `jobs.json` sai: xem danh sách "ComfyUI đang thấy", hoặc dùng `"checkpoint": "auto"` |
-| `Frame ... gần như một màu (đen/trống)` | WAN chạy fp16 trên T4 có thể sinh NaN. Thử thêm `"--fp32-vae"` vào lệnh khởi động ComfyUI ở cell 3, hoặc đổi seed |
-| `out of memory` | Giảm `wan.width`/`wan.height` (VD 384, phải là bội của 32) hoặc `duration` |
-| Quá chậm | Giảm `wan.steps` (VD 12–15, chất lượng giảm nhẹ) hoặc `duration` |
-| `Mọi frame đều trống sau khi tách nền` | Đặt `bg_color` thành màu khác |
-| `Nhân vật lần N: nền là [...], không phải green` | SD vẽ sai màu nền, tool tự gen lại (tối đa 3 lần). Hết 3 lần vẫn tách nền được bằng cách loang từ mép ảnh. Xem `character_preview.png` |
+| `out of memory` | Giảm `edit.size` (VD 640) |
 | `Nhân vật bị thủng ...% thân` | Tách nền ăn mất chi tiết: đổi seed của job, hoặc dùng `mode: "image"` với ảnh nền trong suốt |
-| Animation méo, vỡ mảnh | Mở `debug/clip.gif`: nếu clip WAN đã méo thì sửa prompt action/đổi seed; nếu clip đẹp mà sheet vỡ thì là lỗi hậu xử lý, gửi log + clip cho người bảo trì |
 | `ComfyUI không khởi động được` | Đọc log in ra ở cell 3 (thường do pip cài lỗi) |
 | Session chết / "Kernel died" / lỗi kết nối giữa chừng khi dùng T4 x2 | Thiếu RAM khi 2 ComfyUI cùng giữ model: ở cell 1 đặt `NUM_GPUS = 1`, chạy lại từ cell 1. Action đã xong không bị chạy lại |
 | Hết 30 giờ GPU/tuần | Chờ reset hằng tuần, hoặc thuê Vast.ai/RunPod (notebook chạy được trên mọi máy Linux có GPU) |
@@ -254,22 +266,13 @@ output/
 | Bước | Ước tính |
 |---|---|
 | Cài đặt (clone + pip) | ~5–8 phút |
-| Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
+| Tải FLUX.2 klein từ HuggingFace (nếu không có trong Input) | vài phút (~11.6GB) |
 | Khởi động ComfyUI | ~1–2 phút |
-| 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
-| 1 action 8 frame, engine pose, `layout: "single"` (8 ảnh 512²) | ~1 phút 07 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
-| **1 action 8 frame, engine pose, bảng tư thế (1 ảnh 1536², 3x3 ô)** | **~1.5–2.5 phút** mỗi GPU (ước tính, chưa đo) |
-| 1 action WAN ở 448² (clip 2s = 49 frame, 20 steps) | ~1 phút 24 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
-| 1 action WAN ở 640² | ~3 phút mỗi GPU (ước tính) |
+| 1 nhân vật (768x1024, 4 bước) | ~15–30 giây (ước tính, chưa đo trên T4) |
+| 1 frame (768², 2 ảnh mẫu, 4 bước) | ~10–20 giây; gấp đôi nếu phải vẽ lại img2img (ước tính, chưa đo trên T4) |
+| **1 action 8 frame** | **~1.5–4 phút** mỗi GPU (ước tính, chưa đo trên T4) |
 
-Vì sao 640 mà không 448: WAN 2.2 5B nén 32×32 pixel thành 1 token; ở 448 nhân vật chỉ rộng
-vài token nên clip thật bị biến hình, zoom, tan biến. Muốn nhanh hơn (chấp nhận rủi ro đó): `"wan": {"width": 448, "height": 448}`.
-
-Thời gian tạo sprite do GPU quyết định. Đo trên log thật: thời gian tăng đúng theo
-số frame video WAN (~1,8 giây/frame), phần việc của code SpriteForge chỉ mất vài giây.
-
-Thời gian gần như tỉ lệ với `duration` × `wan.steps`. Còn dư nhiều quota, nên có
-thể tăng `wan.steps` lên 30 để thử chất lượng tốt hơn (~2 phút/action).
+Bật `RUN_BENCHMARK` (mục 2) để đo thật trên GPU của bạn. Muốn nhanh hơn: `"edit": {"size": 640}`.
 
 ---
 
@@ -279,5 +282,27 @@ thể tăng `wan.steps` lên 30 để thử chất lượng tốt hơn (~2 phút
 python -m unittest tests.test_forge -v
 ```
 
-Bộ test dựng một ComfyUI giả, kiểm tra cả luồng: tạo nhân vật, tạo animation,
-sinh sheet/manifest/GIF, chạy tiếp từ chỗ dừng, và việc một action lỗi không làm dừng cả batch.
+Bộ test dựng một ComfyUI giả, kiểm tra cả luồng: tạo nhân vật, con rối, kiểm tra tư thế và
+vẽ lại img2img, sinh sheet/manifest/GIF, chạy tiếp từ chỗ dừng, và việc một action lỗi
+không làm dừng cả batch.
+
+---
+
+## 9. Engine cũ
+
+**`"engine": "pose"`**: SD1.5 pixel art + ControlNet OpenPose + IP-Adapter vẽ theo khung
+xương, mặc định cả action trong một "bảng tư thế". Cần:
+- `"checkpoint"`: tên file checkpoint SD1.5 pixel art, hoặc `"auto"` (lấy file đầu tiên trong
+  Input). Upload checkpoint thành dataset Kaggle; mọi file `.safetensors` lạ trong Input được
+  coi là checkpoint.
+- Cell 1: `DOWNLOAD_POSE_SD = True` (ControlNet + IP-Adapter, ~3.3GB).
+- Khoá `pose`: `strength` (1.0), `ipadapter` (true), `ipadapter_weight` (0.8), `size` (512),
+  `layout` (`"grid"` hoặc `"single"`), `grid_max_cells` (9). `steps`/`cfg_scale` (30/7) là tham số SD1.5.
+- Debug: `board.png`, `poses.png`, `raw.png`, `clean.png`.
+
+**`"engine": "video"`**: WAN 2.2 TI2V 5B tạo clip rồi cắt frame. Chạy thật cho thấy WAN hay
+làm nhân vật pixel nhỏ bị zoom, biến hình hoặc tan biến. Cần `DOWNLOAD_WAN = True` (~17GB).
+Khoá `wan`: `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640),
+`useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600). `bg_color` (`"auto"`) là màu
+nền canvas đưa vào WAN. Debug: `input.png` + `clip.gif`. Một action WAN ở 448² mất ~1 phút 24
+giây trên T4 (đo 10/2026).

@@ -4,9 +4,9 @@
     python kaggle/run_batch.py --jobs jobs.json --out /kaggle/working/output
 
 Hai lượt để không nạp đi nạp lại model:
-  lượt 1  nhân vật của mọi job (SD1.5, trên ComfyUI đầu tiên), rồi gỡ SD khỏi VRAM;
-  lượt 2  animation của mọi action (WAN 2.2), chia đều cho mọi ComfyUI trong
-          --comfy-url (Kaggle "GPU T4 x2": 2 ComfyUI, mỗi cái một GPU -> nhanh ~2 lần).
+  lượt 1  nhân vật của mọi job (FLUX.2 klein hoặc SD1.5, trên ComfyUI đầu tiên);
+  lượt 2  animation của mọi action, chia đều cho mọi ComfyUI trong --comfy-url
+          (Kaggle "GPU T4 x2": 2 ComfyUI, mỗi cái một GPU -> nhanh ~2 lần).
 Resume: action đã "done" trong <job>/progress.json thì bỏ qua. Một action lỗi
 được ghi log rồi chạy tiếp action sau, không dừng cả batch.
 """
@@ -36,7 +36,7 @@ log = logging.getLogger("spriteforge")
 
 
 # GPU thứ 2 trở đi chờ trước khi nhận việc đầu tiên: tránh hai tiến trình ComfyUI
-# cùng nạp ~17GB model vào RAM (~29GB trên Kaggle) một lúc.
+# cùng nạp model (klein ~12GB, WAN ~17GB) vào RAM (~29GB trên Kaggle) một lúc.
 STAGGER_S = 45.0
 
 
@@ -87,18 +87,18 @@ def main(argv: list[str] | None = None) -> int:
              len(clients), out)
 
     # ---------------- lượt 1: nhân vật
-    characters, char_errors, generated = {}, {}, False
+    characters, char_errors, used_sd = {}, {}, False
     for job in cfg.jobs:
         job_dir = out / job.name
         try:
             native, palette, made = ensure_character(client, cfg, job, job_dir,
                                                      Path(args.jobs).resolve().parent)
             characters[job.name] = (native, palette)
-            generated |= made
+            used_sd |= made and config.char_engine(cfg) == "sd"
         except Exception as e:  # noqa: BLE001 - lỗi 1 job không được dừng cả batch
             char_errors[job.name] = f"{type(e).__name__}: {e}"
             log.error("[%s] Lỗi tạo nhân vật: %s\n%s", job.name, e, traceback.format_exc())
-    if generated:
+    if used_sd:  # gỡ SD1.5 khỏi VRAM trước lượt animation (klein thì giữ: frame dùng lại)
         client.free()
 
     # ---------------- lượt 2: animation, mỗi GPU (ComfyUI) một luồng lấy việc từ hàng đợi
@@ -173,7 +173,8 @@ def main(argv: list[str] | None = None) -> int:
 # v4: engine "pose" (khung xương + SD1.5 + ControlNet OpenPose + IP-Adapter) mặc định.
 # v5: làm sạch theo khung xương (bỏ nhân vật thừa, đĩa tròn, vệt đất) cho nhân vật mẫu và frame.
 # v6: bảng tư thế: cả action vẽ trong một ảnh, nhân vật mẫu giữ nguyên ở ô đầu (forge/grid.py).
-PIPELINE_VERSION = 6
+# v7: engine "edit" mặc định: FLUX.2 klein 4B tạo nhân vật + vẽ lại con rối (forge/puppet.py).
+PIPELINE_VERSION = 7
 
 
 def _digest(*parts) -> str:
@@ -193,12 +194,13 @@ def character_fingerprint(cfg: config.Settings, job: config.Job, jobs_dir: Path)
                    cfg.seed, cfg.checkpoint, cfg.steps, cfg.cfg_scale, cfg.sampler, cfg.scheduler,
                    cfg.char_height, cfg.char_height_explicit, cfg.palette, cfg.palette_explicit,
                    cfg.frame_size, cfg.view, cfg.bg_color, cfg.engine,
-                   {k: cfg.pose[k] for k in ("controlnet", "strength", "size")})
+                   {k: cfg.pose[k] for k in ("controlnet", "strength", "size")},
+                   {k: cfg.edit[k] for k in ("unet", "text_encoder", "steps", "cfg")})
 
 
 def action_fingerprint(cfg: config.Settings, job: config.Job, act: config.Action, native) -> str:
     """Mọi thứ quyết định một action, gồm cả ảnh nhân vật thật (đổi nhân vật -> làm lại)."""
-    engine_cfg = cfg.pose if act.engine == "pose" else cfg.wan
+    engine_cfg = {"edit": cfg.edit, "pose": cfg.pose, "video": cfg.wan}[act.engine]
     return _digest(PIPELINE_VERSION, dataclasses.asdict(act), job.prompt, job.seed, cfg.seed,
                    cfg.steps, cfg.cfg_scale, cfg.sampler, cfg.scheduler, cfg.checkpoint,
                    cfg.frame_size, cfg.fps, cfg.preview_scale, cfg.view, cfg.bg_color, engine_cfg,
@@ -220,11 +222,13 @@ def run_action(client: ComfyClient, cfg: config.Settings, job: config.Job, act: 
     """Một action: tạo frame (pose/video) -> hậu xử lý -> 3 file. Không ném lỗi ra ngoài."""
     native, palette = character
     t0 = time.time()
-    if act.engine == "pose":
-        log.info("%s bắt đầu: %d frame, tư thế \"%s\"", tag, act.frames, act.pose)
-    else:
+    if act.engine == "video":
         log.info("%s bắt đầu: %d frame, clip WAN %.1fs", tag, act.frames, act.duration)
-    animate = pipelines.animate_pose if act.engine == "pose" else pipelines.animate_video
+    else:
+        log.info("%s bắt đầu: %d frame, tư thế \"%s\" (engine %s)", tag, act.frames, act.pose,
+                 act.engine)
+    animate = {"edit": pipelines.animate_edit, "pose": pipelines.animate_pose,
+               "video": pipelines.animate_video}[act.engine]
     try:
         frames, layout, info = animate(
             client, cfg, native, palette, act,
@@ -253,10 +257,13 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
     use_video = any(a.engine == "video" for a in actions)
     need_char = any(j.mode == "prompt" and not _character_is_current(cfg, j, out / j.name, jobs_dir)
                     for j in cfg.jobs)
-    use_pose = any(a.engine == "pose" for a in actions) or (need_char and cfg.engine == "pose")
-    need_sd = need_char or use_pose
+    sd_char = need_char and config.char_engine(cfg) == "sd"
+    use_edit = any(a.engine == "edit" for a in actions) or (need_char and not sd_char)
+    use_pose = any(a.engine == "pose" for a in actions) or (sd_char and cfg.engine == "pose")
+    need_sd = sd_char or use_pose
     nodes = ((workflows.WAN_NODES if use_video else []) + (workflows.SD15_NODES if need_sd else [])
-             + (workflows.POSE_NODES if use_pose else []))
+             + (workflows.POSE_NODES if use_pose else [])
+             + (workflows.KLEIN_NODES if use_edit else []))
     for node in client.missing_nodes(sorted(set(nodes))):
         problems.append(f"node ComfyUI '{node}' (cập nhật ComfyUI lên bản mới)")
 
@@ -268,6 +275,9 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
                         "giống nhau hơn). Cập nhật ComfyUI lên bản mới.", ", ".join(missing))
 
     wanted = []
+    if use_edit:
+        wanted += [("diffusion_models", cfg.edit["unet"]), ("text_encoders", cfg.edit["text_encoder"]),
+                   ("vae", cfg.edit["vae"])]
     if use_video:
         wanted += [("diffusion_models", cfg.wan["unet"]), ("text_encoders", cfg.wan["text_encoder"]),
                    ("vae", cfg.wan["vae"])]
@@ -331,9 +341,11 @@ def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
     info: dict = {"mode": job.mode, "fingerprint": character_fingerprint(cfg, job, jobs_dir)}
     if job.mode == "prompt":
         log.info("[%s] tạo nhân vật từ prompt...", job.name)
-        raw, gen = pipelines.generate_character(client, cfg, job.prompt, job.seed)
+        generate = (pipelines.generate_character_edit if config.char_engine(cfg) == "edit"
+                    else pipelines.generate_character)
+        raw, gen = generate(client, cfg, job.prompt, job.seed)
         raw.save(job_dir / "character_raw.png")
-        raw = gen.pop("cutout", raw)  # nhân vật đã tách nền + làm sạch (engine pose)
+        raw = gen.pop("cutout", raw)  # nhân vật đã tách nền + làm sạch
         info.update(gen)
     else:
         src = _resolve_path(job.character_image, jobs_dir)
