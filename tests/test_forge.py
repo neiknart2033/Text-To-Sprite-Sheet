@@ -755,6 +755,35 @@ class EditEngineTests(unittest.TestCase):
             self.assertEqual(len(fake.prompts), 1 + 5 + 2 + len(i2i))
             _close_log_handlers()
 
+    def test_both_draws_off_pose_fall_back_to_puppet(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            native = self._native()
+            native.save(d / "hero.png")
+            job = {"name": "hero", "mode": "image", "character_image": "hero.png",
+                   "actions": [{"name": "attack", "prompt": "BADDRAW slash", "frames": 5}]}
+            self.assertEqual(self._run(fake, d, [], job=job), 0)
+            m = json.loads((d / "o/hero/attack/manifest.json").read_text(encoding="utf-8"))
+            frames = m["meta"]["frames"]
+            self.assertGreaterEqual([f["mode"] for f in frames].count("puppet"), 3)
+            for f in frames:
+                self.assertEqual(f["ok"], f["mode"] != "puppet")
+            # frame dùng con rối = pixel của chính sprite mẫu, đúng tư thế chém
+            rig = puppet.Rig(native, 768)
+            key = poses.sequence("attack", 5)[2]
+            expect = pixel.video_frame_to_native(rig.pose(key), pixel.VideoLayout(
+                k=rig.pl.k, width=768, height=768, center_x=rig.pl.hip_x / rig.pl.k,
+                ground_y=rig.pl.ground_y / rig.pl.k), pipelines.palette_of(native, 255))
+            self.assertEqual(frames[2]["mode"], "puppet")
+            sheet_img = Image.open(d / "o/hero/attack/spritesheet.png").convert("RGBA")
+            cell = sheet_img.crop((2 * 128, 0, 3 * 128, 128))
+            box = cell.getbbox()
+            self.assertEqual((box[2] - box[0], box[3] - box[1]), expect.crop(expect.getbbox()).size)
+            log_text = (d / "o/run_log.txt").read_text(encoding="utf-8")
+            self.assertIn("dùng con rối", log_text)
+            self.assertTrue((d / "o/hero/attack/debug/raw.png").exists())
+            _close_log_handlers()
+
     def test_user_sprite_keeps_pixels_and_palette(self):
         with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
             d = Path(d)

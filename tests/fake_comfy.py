@@ -10,6 +10,7 @@ Mô phỏng đúng các endpoint SpriteForge dùng: /system_stats, /object_info,
 - Graph FLUX.2 klein (Flux2Scheduler): không ảnh mẫu -> nhân vật nền trắng; có ảnh mẫu
   -> trả lại ảnh 1 (con rối) như thể đã vẽ sạch. Prompt có "COPYREF" -> lỗi thật đã thấy:
   model chép nguyên ảnh 2 (tư thế đứng), trừ khi chạy img2img (SetFirstSigma).
+  "BADDRAW" -> chép ảnh 2 cả khi chạy img2img (để test lớp lùi cuối: dùng con rối).
 - Prompt chứa "FAIL_ME" -> history trả lỗi execution_error; "GRIDOOM" -> chỉ graph bảng
   tư thế lỗi hết VRAM (để test đường lùi về vẽ từng frame).
 """
@@ -148,7 +149,8 @@ def fake_klein(graph: dict, uploads: dict, texts: str) -> Image.Image:
             img = Image.fromarray(a)
         return img
     img2img = any(n["class_type"] == "SetFirstSigma" for n in graph.values())
-    src = uploads[refs[1] if "COPYREF" in texts and not img2img and len(refs) > 1 else refs[0]]
+    copy = len(refs) > 1 and ("BADDRAW" in texts or ("COPYREF" in texts and not img2img))
+    src = uploads[refs[1] if copy else refs[0]]
     a = np.asarray(src.convert("RGB")).astype(np.int16)
     a += rng.integers(-3, 4, a.shape, dtype=np.int16)  # model vẽ lại: màu lệch nhẹ
     return Image.fromarray(np.clip(a, 0, 255).astype(np.uint8), "RGB")

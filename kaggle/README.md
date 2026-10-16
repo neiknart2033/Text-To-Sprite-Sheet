@@ -16,8 +16,8 @@ Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`), engine mặc định `"ed
    - **Vẽ lại:** klein nhận ảnh 1 = con rối, ảnh 2 = sprite mẫu, và vẽ lại con rối cho sạch
      mà vẫn giữ nguyên tư thế, ngoại hình theo sprite mẫu.
    - **Kiểm tra:** hình bóng ảnh vẽ lại phải khớp con rối. Nếu model "lười", chép lại tư
-     thế đứng của ảnh mẫu, tool tự vẽ lại kiểu img2img từ chính con rối, khi đó tư thế
-     chắc chắn đúng.
+     thế đứng của ảnh mẫu, tool tự vẽ lại kiểu img2img từ chính con rối. Vẫn lệch thì
+     **dùng thẳng con rối** làm frame: thô ở khớp, nhưng chắc chắn đúng nhân vật, đúng tư thế.
 3. **Hậu xử lý:** tách nền, thu về pixel gốc **đúng lưới** của sprite mẫu, ép đúng palette
    của nhân vật, đặt vào các ô cùng kích thước, rồi xuất sheet, manifest và GIF.
 
@@ -224,7 +224,8 @@ output/
 ```
 
 `manifest.json` có `anchor` (điểm chân nhân vật trong ô) để engine game căn sprite, và
-`meta.frames`: với mỗi frame, ảnh được vẽ kiểu nào (`edit` hoặc `img2img`) và độ khớp
+`meta.frames`: với mỗi frame, ảnh được vẽ kiểu nào (`edit`, `img2img`, hoặc `puppet` =
+dùng thẳng con rối vì model vẽ lệch tư thế) và độ khớp
 với con rối (`follow`).
 
 ---
@@ -249,7 +250,7 @@ với con rối (`follow`).
 | `Thiếu: model 'flux-2-klein-4b-fp8.safetensors'` (hoặc `qwen_3_4b`, `flux2-vae`) | Cell 2 của notebook là bản cũ: import lại `kaggle/SpriteForge_Kaggle.ipynb` (mục 1.4), chạy lại cell 2 rồi cell 3 |
 | `Thiếu: node ComfyUI 'Flux2Scheduler'` (hoặc `ReferenceLatent`, `EmptyFlux2LatentImage`) | ComfyUI quá cũ: để `COMFY_REF = ""` ở cell 1 để dùng bản mới nhất |
 | `FLUX.2 klein trả về ảnh gần như một màu (đen/trống)` | fp16 tràn số trên T4: ở cell 1 đặt `COMFY_ARGS = "--bf16-unet"` (chậm hơn) rồi chạy lại cell 3 và cell 6 |
-| `frame N: ảnh vẽ lại không khớp tư thế` | Cả hai cách vẽ đều lệch: xem mục 5 "Frame sai tư thế" |
+| `frame N: ảnh vẽ lại không khớp tư thế -> dùng con rối` | Cả hai cách vẽ đều lệch nên frame đó lấy thẳng con rối (thô ở khớp). Xem `debug/raw.png` để biết model vẽ gì, rồi xem mục 5 "Frame sai tư thế" |
 | `N/M frame phải vẽ lại kiểu img2img` | Bình thường: model chép tư thế đứng ở các frame đó nên tool vẽ lại từ con rối (tốn thêm thời gian) |
 | `Nhân vật lần N: có nhiều nhân vật/mảng rời` | Model vẽ nhiều nhân vật, tool tự gen lại (tối đa 3 lần) và chỉ giữ nhân vật lớn nhất |
 | `chưa có tư thế mẫu "..."` | Tên action không trùng tư thế có sẵn: thêm `"pose": "<tên có sẵn>"` vào action đó |

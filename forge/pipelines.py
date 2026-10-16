@@ -376,7 +376,7 @@ def animate_edit(client: ComfyClient, cfg: Settings, native: Image.Image,
     Con rối (forge/puppet.py) đã đúng tư thế và đúng màu, chỉ còn thô ở khớp -> model chỉ
     phải "sửa cho sạch", việc mà model sửa ảnh làm tốt nhất. Mỗi frame được kiểm tra: hình
     bóng phải khớp con rối (không phải tư thế đứng của ảnh mẫu); không khớp thì vẽ lại kiểu
-    img2img từ chính con rối (`fallback_denoise`), tư thế khi đó chắc chắn đúng.
+    img2img từ chính con rối (`fallback_denoise`); vẫn không khớp thì dùng thẳng con rối.
     Mọi frame cùng seed, cùng chỗ đặt, cùng tỉ lệ xk -> thu về pixel gốc khớp đúng lưới.
     """
     e = cfg.edit
@@ -415,14 +415,17 @@ def animate_edit(client: ComfyClient, cfg: Settings, native: Image.Image,
                 best = cand
             if ok:
                 break
+        raws.append(best["raw"])  # debug luôn giữ ảnh model vẽ, kể cả khi không dùng
         if not best["ok"]:
-            log.warning("%s frame %d: ảnh vẽ lại không khớp tư thế (khớp %.0f%%), dùng ảnh tốt nhất",
+            # Lớp lùi cuối: cả hai cách vẽ đều lệch tư thế -> dùng thẳng con rối. Thô ở khớp
+            # nhưng chắc chắn đúng nhân vật (pixel của chính sprite mẫu) và đúng tư thế.
+            log.warning("%s frame %d: ảnh vẽ lại không khớp tư thế (khớp %.0f%%) -> dùng con rối",
                         action.name, i + 1, best["follow"] * 100)
+            best = {**best, "mode": "puppet", "cut": pup}
         checks.append({"mode": best["mode"], "follow": round(best["follow"], 3),
                        "moved_covered": round(best["gain"], 3), "ok": best["ok"]})
         frames.append(pixel.video_frame_to_native(best["cut"], layout, palette))
         puppets.append(puppet.on_white(pup))
-        raws.append(best["raw"])
         cleans.append(best["cut"])
     if debug_dir:  # con rối (ảnh 1 đưa vào model) + ảnh model vẽ + sau tách nền, từng frame
         debug_dir = Path(debug_dir)
@@ -437,10 +440,11 @@ def animate_edit(client: ComfyClient, cfg: Settings, native: Image.Image,
                          "trắng. Xem debug/raw.png.")
     if empty:
         log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
-    fallback = sum(c["mode"] != "edit" for c in checks)
-    if fallback:
-        log.info("%s: %d/%d frame phải vẽ lại kiểu img2img từ con rối", action.name, fallback,
-                 len(checks))
+    for mode, what in (("img2img", "phải vẽ lại kiểu img2img từ con rối"),
+                       ("puppet", "dùng thẳng con rối (model vẽ lệch tư thế)")):
+        count = sum(c["mode"] == mode for c in checks)
+        if count:
+            log.info("%s: %d/%d frame %s", action.name, count, len(checks), what)
     return frames, layout, {"engine": "edit", "pose": action.pose, "seed": seed, "prompt": prompt,
                             "scale_k": pl.k, "frames": checks}
 

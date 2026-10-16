@@ -353,9 +353,11 @@ ma-nơ-canh): nhân vật giữ **đúng y** (giáp, khăn đỏ, kiếm), nhưn
 `workflows.klein` (UNETLoader + CLIPLoader `flux2` + VAELoader; `CLIPTextEncode` ->
 `ReferenceLatent` x2 (con rối, mẫu; negative = `ConditioningZeroOut` cũng gắn 2 ảnh);
 `CFGGuider` cfg 1; `Flux2Scheduler` 4 bước; `EmptyFlux2LatentImage`; `SamplerCustomAdvanced`
-euler) -> kiểm `follows_pose`; không đạt -> img2img: latent = VAEEncode(con rối),
-`SplitSigmasDenoise(fallback_denoise=0.7)`; chọn ảnh khớp nhất -> `cutout_flat` -> `keep_near`
--> `video_frame_to_native` (thu xk, ép palette). Cùng seed mọi frame. ComfyUI cache
+euler) -> `cutout_flat` -> `keep_near` -> kiểm `follows_pose`; không đạt -> img2img: latent =
+VAEEncode(con rối), `SplitSigmas` + `SetFirstSigma` để sigma bắt đầu đúng = `fallback_denoise`
+(0.7; lịch FLUX.2 dồn về nhiễu cao nên `SplitSigmasDenoise` sẽ bắt đầu ở .962); vẫn không đạt
+-> **lớp lùi cuối: dùng thẳng con rối** (`mode: "puppet"`, chắc chắn đúng nhân vật + tư thế,
+thô ở khớp) -> `video_frame_to_native` (thu xk, ép palette). Cùng seed mọi frame. ComfyUI cache
 `CLIPTextEncode`/`VAEEncode` ảnh mẫu giữa các frame cùng action.
 
 **Nhân vật** (mode prompt, `generate_character_edit`): klein text-to-image 768x1024, nền trắng;
