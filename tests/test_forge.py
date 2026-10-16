@@ -465,14 +465,26 @@ class PoseEngineTests(unittest.TestCase):
             self.assertTrue(all("ControlNetApplyAdvanced" in k for k in kinds))
             self.assertNotIn("IPAdapter", kinds[0])                      # nhân vật: chỉ khung xương
             self.assertTrue(all("IPAdapter" in k for k in kinds[1:]))     # frame: + giữ ngoại hình
-            self.assertEqual(len(fake.prompts), 1 + 8 + 6 + 4 + 6)
+            # Bảng tư thế: mỗi action MỘT ảnh SD (không phải mỗi frame một ảnh)
+            self.assertEqual(len(fake.prompts), 1 + 4)
+            self.assertTrue(all("SetLatentNoiseMask" in k for k in kinds[1:]))
+            idle_graph = fake.prompts[1]
+            init = fake.uploads[idle_graph["40"]["inputs"]["image"]]
+            mask = np.asarray(fake.uploads[idle_graph["42"]["inputs"]["image"]].convert("L"))
+            self.assertEqual(init.size, (1536, 1536))                    # 8 frame + ô mẫu = 3x3
+            self.assertEqual(mask[256, 256], 0)                          # ô mẫu: giữ nguyên
+            self.assertTrue((mask[512:, :] == 255).all() and (mask[:512, 512:] == 255).all())
+            self.assertLess(np.asarray(init.crop((0, 0, 512, 512)).convert("L")).min(), 200)  # có nhân vật mẫu
+            self.assertEqual(np.asarray(init.crop((512, 0, 1536, 1536)).convert("L")).min(), 255)
             anchors = set()
             for act, n, cols in (("idle", 8, 8), ("attack", 6, 3), ("slash2", 4, 4), ("jump", 6, 6)):
                 m = json.loads((d / "o/ronin" / act / "manifest.json").read_text(encoding="utf-8"))
                 self.assertEqual((m["frameCount"], m["columns"], m["frameWidth"]), (n, cols, 128))
                 self.assertEqual(m["meta"]["engine"], "pose")
+                self.assertEqual((m["meta"]["layout"], m["meta"]["boards"]), ("grid", 1))
                 anchors.add(json.dumps(m["anchor"]))
                 self.assertTrue((d / "o/ronin" / act / "debug" / "poses.png").exists())
+                self.assertTrue((d / "o/ronin" / act / "debug" / "board.png").exists())
             self.assertEqual(len(anchors), 1)  # mọi action cùng điểm neo chân
             self.assertFalse(json.loads((d / "o/ronin/jump/manifest.json").read_text())["loop"])
             # nhảy: frame giữa phải cao hơn frame đầu (chuyển động thật được giữ)
@@ -556,6 +568,55 @@ class PoseEngineTests(unittest.TestCase):
                 box = cell.getbbox()
                 self.assertLess(box[3] - box[1], 128)
             _close_log_handlers()
+
+    def test_grid_shape_and_chunks(self):
+        from forge import grid
+        self.assertEqual([grid.shape(n) for n in (2, 3, 4, 5, 7, 9)],
+                         [(2, 1), (3, 1), (2, 2), (3, 2), (4, 2), (3, 3)])
+        self.assertEqual(grid.chunks(8, 9), [list(range(8))])
+        self.assertEqual([len(c) for c in grid.chunks(10, 9)], [5, 5])  # chia đều, không 8 + 2
+        self.assertEqual([len(c) for c in grid.chunks(16, 9)], [8, 8])
+        self.assertEqual(sum(grid.chunks(13, 5), []), list(range(13)))
+
+    def test_grid_failure_falls_back_to_single_frames(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            self.assertEqual(self._run(fake, d, [{"name": "walk", "prompt": "GRIDOOM walking",
+                                                  "frames": 4}]), 0)
+            # nhân vật + bảng lỗi + 4 frame vẽ lẻ
+            self.assertEqual(len(fake.prompts), 1 + 1 + 4)
+            m = json.loads((d / "o/ronin/walk/manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual((m["meta"]["layout"], m["frameCount"]), ("single", 4))
+            self.assertIn("vẽ từng frame", (d / "o/run_log.txt").read_text(encoding="utf-8"))
+            _close_log_handlers()
+
+    def test_long_action_uses_several_boards(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            self.assertEqual(self._run(fake, d, [{"name": "run", "prompt": "running", "frames": 12}]), 0)
+            self.assertEqual(len(fake.prompts), 1 + 2)  # 12 frame -> 2 bảng x 6 frame (4x2 ô)
+            sizes = {fake.uploads[g["40"]["inputs"]["image"]].size for g in fake.prompts[1:]}
+            self.assertEqual(sizes, {(2048, 1024)})
+            self.assertTrue((d / "o/ronin/run/debug/board_2.png").exists())
+            sheet_img = Image.open(d / "o/ronin/run/spritesheet.png")
+            self.assertTrue(all(sheet_img.crop((i * 128, 0, i * 128 + 128, 128)).getbbox()
+                                for i in range(12)))
+            _close_log_handlers()
+
+    def test_missing_grid_nodes_and_layout_config(self):
+        with FakeComfy(grid=False) as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            self.assertEqual(self._run(fake, d, [{"name": "idle", "prompt": "x", "frames": 2}]), 0)
+            self.assertFalse(any("SetLatentNoiseMask" in json.dumps(g) for g in fake.prompts))
+            self.assertIn("thiếu node", (d / "o/run_log.txt").read_text(encoding="utf-8"))
+            _close_log_handlers()
+        base = {"checkpoint": "auto", "jobs": [{"name": "a", "prompt": "p",
+                                                "actions": [{"name": "idle", "prompt": "x"}]}]}
+        self.assertEqual(config.parse(base).pose["layout"], "grid")
+        with self.assertRaisesRegex(config.ConfigError, "layout"):
+            config.parse({**base, "pose": {"layout": "board"}})
+        with self.assertRaisesRegex(config.ConfigError, "grid_max_cells"):
+            config.parse({**base, "pose": {"grid_max_cells": 1}})
 
     def test_pose_engine_without_ipadapter_still_runs(self):
         with FakeComfy(ipadapter=False) as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:

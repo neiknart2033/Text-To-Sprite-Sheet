@@ -172,7 +172,8 @@ def main(argv: list[str] | None = None) -> int:
 #     chọn frame lành trong ±2 frame.
 # v4: engine "pose" (khung xương + SD1.5 + ControlNet OpenPose + IP-Adapter) mặc định.
 # v5: làm sạch theo khung xương (bỏ nhân vật thừa, đĩa tròn, vệt đất) cho nhân vật mẫu và frame.
-PIPELINE_VERSION = 5
+# v6: bảng tư thế: cả action vẽ trong một ảnh, nhân vật mẫu giữ nguyên ở ô đầu (forge/grid.py).
+PIPELINE_VERSION = 6
 
 
 def _digest(*parts) -> str:
@@ -258,6 +259,13 @@ def preflight(client: ComfyClient, cfg: config.Settings, jobs_dir: Path, out: Pa
              + (workflows.POSE_NODES if use_pose else []))
     for node in client.missing_nodes(sorted(set(nodes))):
         problems.append(f"node ComfyUI '{node}' (cập nhật ComfyUI lên bản mới)")
+
+    if use_pose and cfg.pose["layout"] == "grid":
+        missing = client.missing_nodes(workflows.GRID_NODES)
+        if missing:
+            cfg.pose["layout"] = "single"
+            log.warning("ComfyUI thiếu node %s: vẽ từng frame thay cho bảng tư thế (frame kém "
+                        "giống nhau hơn). Cập nhật ComfyUI lên bản mới.", ", ".join(missing))
 
     wanted = []
     if use_video:

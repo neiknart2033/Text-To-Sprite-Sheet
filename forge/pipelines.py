@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import cleanup, matting, pixel, poses, sheet, workflows
+from . import cleanup, grid, matting, pixel, poses, sheet, workflows
 from .comfy import ComfyClient, ComfyError
 from .config import VIEWS, Action, Settings
 
@@ -59,6 +59,16 @@ FRAME_SEARCH = 2  # mỗi frame cần lấy được chọn frame "lành" nhất
 # Engine pose: mô tả nhân vật + động tác; khung xương quyết định tư thế, IP-Adapter giữ ngoại hình.
 POSE_PROMPT = ("pixel art, game sprite, {character}{action}, single character, full body, "
                "({view}:1.2), centered, simple white background")
+# Bảng tư thế: cả action trong một ảnh -> prompt nói rõ "cùng một nhân vật lặp lại", và
+# KHÔNG cấm "character sheet / multiple characters" như khi vẽ lẻ: ở đây đó là thứ cần vẽ.
+GRID_PROMPT = ("pixel art, game sprite sheet, the same character repeated in every frame, "
+               "{character}{action}, full body, ({view}:1.2), simple white background")
+GRID_NEGATIVE = ("different characters, inconsistent design, different clothes, different colors, "
+                 "cropped, cut off feet, cut off head, circle, sun, halo, round backdrop, emblem, "
+                 "logo, banner, building, ground, floor, platform, grid lines, panel border, frame, "
+                 "blurry, 3d render, realistic, photo, text, watermark, signature, scenery, "
+                 "detailed background, gradient background, shadow, {other_view}")
+GRID_TIMEOUT_S = 1800  # bảng 3x3 ô 512px trên T4 ~2 phút; chừa rộng cho GPU đang bận
 
 
 def resolve_seed(*candidates: int | None) -> int:
@@ -272,61 +282,113 @@ def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,
                  palette: np.ndarray, action: Action, description: str | None = None,
                  seed: int | None = None, debug_dir: str | Path | None = None,
                  ) -> tuple[list[Image.Image], pixel.VideoLayout, dict]:
-    """Engine pose: mỗi frame = SD1.5 + ControlNet OpenPose (+ IP-Adapter) theo thư viện tư thế.
+    """Engine pose: SD1.5 + ControlNet OpenPose (+ IP-Adapter) theo thư viện tư thế.
 
-    Mọi frame cùng seed, cùng khung xương tỉ lệ, cùng đường nền -> không zoom, không trôi,
-    số frame đúng chính xác. Ảnh SD (nền trắng) được tách nền và thu về pixel gốc theo
-    MỘT tỉ lệ chung cho mọi action (chiều cao đứng của nhân vật = chiều cao sprite gốc).
+    layout "grid" (mặc định): cả action vẽ trong MỘT ảnh, nhân vật mẫu giữ nguyên ở ô đầu
+    (forge/grid.py) -> các frame giống nhau hơn hẳn vẽ lẻ. Bảng lỗi (VD hết VRAM) thì tự
+    chuyển sang vẽ từng frame. layout "single": mỗi frame một ảnh, cùng seed.
+    Mọi frame cùng khung xương tỉ lệ, cùng đường nền -> không zoom, không trôi, số frame
+    đúng chính xác. Ảnh SD (nền trắng) được tách nền, làm sạch theo khung xương, rồi thu
+    về pixel gốc theo MỘT tỉ lệ chung cho mọi action (chiều cao đứng = sprite gốc).
     """
     p = cfg.pose
     size = int(p["size"])
     keys = poses.sequence(action.pose or action.name, action.frames)
     seed = resolve_seed(action.seed, seed, cfg.seed)
+    anchor = reference_image(native, size)
     ref_name = None
     if p.get("ipadapter"):
-        ref_name = client.upload_image(reference_image(native, size),
-                                       f"spriteforge_ref_{uuid.uuid4().hex[:12]}.png")
-    character = f"{description.strip().rstrip('.')}, " if description else ""
-    prompt = POSE_PROMPT.format(character=character, action=action.prompt.strip().rstrip("."),
-                                view=VIEWS[cfg.view])
-    negative = CHAR_NEGATIVE.format(other_view=OTHER_VIEW[cfg.view])
+        ref_name = client.upload_image(anchor, f"spriteforge_ref_{uuid.uuid4().hex[:12]}.png")
+    text = {"character": f"{description.strip().rstrip('.')}, " if description else "",
+            "action": action.prompt.strip().rstrip("."), "view": VIEWS[cfg.view]}
+    common = {"checkpoint": cfg.checkpoint_file or cfg.checkpoint, "controlnet": p["controlnet"],
+              "strength": float(p["strength"]), "reference_image": ref_name,
+              "ipadapter_weight": float(p["ipadapter_weight"]),
+              "ipadapter_preset": str(p["ipadapter_preset"]), "size": size, "steps": cfg.steps,
+              "cfg": cfg.cfg_scale, "sampler": cfg.sampler, "scheduler": cfg.scheduler, "seed": seed}
+
+    raws, boards, layout_used = None, [], "single"
+    if p.get("layout") == "grid":
+        prompt = GRID_PROMPT.format(**text)
+        negative = GRID_NEGATIVE.format(other_view=OTHER_VIEW[cfg.view])
+        try:
+            raws, boards = _draw_boards(client, keys, anchor, int(p["grid_max_cells"]),
+                                        prompt, negative, common)
+            layout_used = "grid"
+        except ComfyError as e:
+            log.warning("Vẽ bảng tư thế lỗi (%s) -> vẽ từng frame. Nếu lỗi hết VRAM: đặt \"pose\": "
+                        "{\"grid_max_cells\": 5} (bảng nhỏ hơn) hoặc {\"layout\": \"single\"}.", e)
+    if raws is None:
+        prompt = POSE_PROMPT.format(**text)
+        negative = CHAR_NEGATIVE.format(other_view=OTHER_VIEW[cfg.view])
+        raws = [_draw_single(client, key, prompt, negative, common) for key in keys]
 
     scale = native.height / poses.standing_height_px(size)
     side = max(8, round(size * scale))
     hip_x, ground_y = poses.ground_px(size)
     layout = pixel.VideoLayout(k=1, width=side, height=side,
                                center_x=hip_x * scale, ground_y=ground_y * scale)
-    frames, skeletons, raws, cleans = [], [], [], []
-    for key in keys:
-        skeleton = poses.render(key, size)
-        pose_name = client.upload_image(skeleton, f"spriteforge_pose_{uuid.uuid4().hex[:12]}.png")
-        graph = workflows.sd15_pose(
-            cfg.checkpoint_file or cfg.checkpoint, prompt, negative, seed, pose_name,
-            p["controlnet"], float(p["strength"]), reference_image=ref_name,
-            ipadapter_weight=float(p["ipadapter_weight"]), ipadapter_preset=str(p["ipadapter_preset"]),
-            size=size, steps=cfg.steps, cfg=cfg.cfg_scale, sampler=cfg.sampler,
-            scheduler=cfg.scheduler)
-        raw = client.fetch(client.run(graph, workflows.POSE_OUTPUT, timeout_s=900)[0]).convert("RGB")
+    frames, cleans = [], []
+    for key, raw in zip(keys, raws):
         bg = matting.border_color(np.asarray(raw).astype(np.int16))
         cleaned, _ = cleanup.clean_figure(matting.cutout_flat(raw), key, bg)
         frames.append(pixel.frame_to_native(cleaned, (side, side), palette))
-        skeletons.append(skeleton)
-        raws.append(raw)
         cleans.append(cleaned)
     if debug_dir:  # khung xương + ảnh SD gốc + sau làm sạch, từng frame, để soi lỗi
         debug_dir = Path(debug_dir)
         debug_dir.mkdir(parents=True, exist_ok=True)
-        _strip(skeletons, debug_dir / "poses.png")
+        _strip([poses.render(k, size) for k in keys], debug_dir / "poses.png")
         _strip(raws, debug_dir / "raw.png")
         _strip([_on_gray(c) for c in cleans], debug_dir / "clean.png")
+        for i, board in enumerate(boards):
+            board.save(debug_dir / ("board.png" if i == 0 else f"board_{i + 1}.png"))
     empty = sum(pixel.bbox(f) is None for f in frames)
     if empty == len(frames):
         raise ComfyError("Mọi frame đều trống sau khi tách nền: SD không vẽ nhân vật trên nền "
                          "trắng. Xem debug/raw.png.")
     if empty:
         log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
-    return frames, layout, {"engine": "pose", "pose": action.pose, "seed": seed, "prompt": prompt,
+    return frames, layout, {"engine": "pose", "pose": action.pose, "layout": layout_used,
+                            "boards": len(boards), "seed": seed, "prompt": prompt,
                             "ipadapter": bool(ref_name), "scale": round(scale, 4)}
+
+
+def _draw_single(client: ComfyClient, key: dict, prompt: str, negative: str,
+                 common: dict) -> Image.Image:
+    """Một frame = một ảnh SD vẽ theo một khung xương."""
+    pose_name = client.upload_image(poses.render(key, common["size"]),
+                                    f"spriteforge_pose_{uuid.uuid4().hex[:12]}.png")
+    graph = workflows.sd15_pose(prompt=prompt, negative=negative, pose_image=pose_name, **common)
+    return client.fetch(client.run(graph, workflows.POSE_OUTPUT, timeout_s=900)[0]).convert("RGB")
+
+
+def _draw_boards(client: ComfyClient, keys: list[dict], anchor: Image.Image, max_cells: int,
+                 prompt: str, negative: str, common: dict,
+                 ) -> tuple[list[Image.Image], list[Image.Image]]:
+    """Vẽ frame theo bảng tư thế: ô 0 = nhân vật mẫu (giữ nguyên), ô 1.. = các frame.
+    Trả về (ảnh từng frame cỡ size x size, ảnh từng bảng)."""
+    size = common["size"]
+    raws, boards = [], []
+    for idx in grid.chunks(len(keys), max_cells):
+        cols, rows = grid.shape(len(idx) + 1)
+        cells = list(range(1, len(idx) + 1))
+        skeletons = [poses.render(poses.NEUTRAL, size)] + [poses.render(keys[i], size) for i in idx]
+        init = grid.compose([anchor], cols, rows, size, (255, 255, 255))
+        tag = uuid.uuid4().hex[:12]
+        pose_name, init_name, mask_name = (
+            client.upload_image(im, f"spriteforge_{kind}_{tag}.png") for kind, im in (
+                ("pose", grid.compose(skeletons, cols, rows, size, (0, 0, 0))), ("board", init),
+                ("mask", grid.mask(cells, cols, rows, size))))
+        graph = workflows.sd15_pose(prompt=prompt, negative=negative, pose_image=pose_name,
+                                    init_image=init_name, init_mask=mask_name, **common)
+        board = client.fetch(client.run(graph, workflows.POSE_OUTPUT,
+                                        timeout_s=GRID_TIMEOUT_S)[0]).convert("RGB")
+        if board.size != init.size:
+            raise ComfyError(f"bảng tư thế trả về ảnh {board.size[0]}x{board.size[1]}, "
+                             f"cần {init.size[0]}x{init.size[1]}")
+        raws += grid.split(board, cells, cols, size)
+        boards.append(board)
+    return raws, boards
 
 
 def _on_gray(rgba: Image.Image) -> Image.Image:

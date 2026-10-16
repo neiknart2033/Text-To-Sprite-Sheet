@@ -15,8 +15,13 @@ POSE_DEFAULTS = {
     "ipadapter": True,         # giữ ngoại hình theo ảnh nhân vật (cần ComfyUI_IPAdapter_plus)
     "ipadapter_preset": "PLUS (high strength)",
     "ipadapter_weight": 0.8,
-    "size": 512,               # cạnh ảnh SD sinh mỗi frame
+    "size": 512,               # cạnh ảnh SD sinh mỗi frame (= cạnh một ô của bảng tư thế)
+    # "grid": cả action trong MỘT ảnh, nhân vật mẫu nằm sẵn ở ô đầu -> frame giống nhau
+    # hơn hẳn (forge/grid.py). "single": mỗi frame một ảnh (cách cũ, ít VRAM nhất).
+    "layout": "grid",
+    "grid_max_cells": 9,       # số ô tối đa một bảng (kể cả ô mẫu): 9 = 3x3 = 1536x1536px
 }
+POSE_LAYOUTS = ("grid", "single")
 
 WAN_DEFAULTS = {
     "unet": "wan2.2_ti2v_5B_fp16.safetensors",
@@ -132,6 +137,11 @@ def parse(raw: dict) -> Settings:
     s.palette_explicit = raw.get("palette") is not None
     s.wan = {**WAN_DEFAULTS, **(raw.get("wan") or {})}
     s.pose = {**POSE_DEFAULTS, **(raw.get("pose") or {})}
+    if s.pose["layout"] not in POSE_LAYOUTS:
+        raise ConfigError(f"pose.layout phải là một trong {POSE_LAYOUTS}, đang là {s.pose['layout']!r}")
+    s.pose["grid_max_cells"] = _int(s.pose["grid_max_cells"], "pose.grid_max_cells")
+    if not 2 <= s.pose["grid_max_cells"] <= 16:
+        raise ConfigError("pose.grid_max_cells phải trong khoảng 2..16")
     s.engine = str(raw.get("engine", s.engine))
     if s.engine not in ENGINES:
         raise ConfigError(f"engine phải là một trong {ENGINES}, đang là {s.engine!r}")

@@ -7,6 +7,9 @@
 **v2 (15/10/2026):** ghép hai dự án mã nguồn mở. Engine animation Phase 1 là
 **WAN 2.2 TI2V 5B (video)**, thay cho "grid img2img" của v1.
 
+**v6 (16/10/2026): bảng tư thế** (mục 4b): cả action vẽ trong một ảnh, nhân vật mẫu giữ
+nguyên ở ô đầu -> frame nhất quán hơn vẽ lẻ.
+
 **v4 (15/10/2026): engine mặc định đổi sang `pose`** (mục 4b). Ba lần chạy thật với WAN
 (448px) cho clip bị zoom, biến hình, bóng mờ, tan biến (xem `debug/clip.gif`): WAN 5B nén
 32x32 px thành 1 token, sprite nhỏ chỉ vài token nên không giữ được hình; hậu xử lý không cứu
@@ -284,6 +287,18 @@ Chạy test local: `python -m unittest tests.test_forge -v` (không cần GPU).
   (đã thử nới cho mảng rất lớn: bóc mất áo choàng thật -> bỏ); xoá viền/nền trắng lộ ra; bỏ
   phần "dày" ngoài vùng thân rộng (giữ kiếm mảnh); dưới đường nền chỉ giữ bàn chân. Nhân vật
   mẫu bẩn (> 15% bị xoá) -> thử seed khác.
+- **Bảng tư thế** (`forge/grid.py`, v6, `pose.layout = "grid"` mặc định): vẽ lẻ từng frame thì
+  mỗi lần SD "nghĩ lại" chi tiết (hoa văn, màu dây lưng, độ dài kiếm) -> frame nhấp nháy dù cùng
+  seed + IP-Adapter. Giờ cả action là MỘT ảnh lưới (`grid.shape`: 9 ô -> 3x3, 7 -> 4x2; ô 512px):
+  ô 0 = nhân vật mẫu (`reference_image`, khung xương `NEUTRAL`), ô 1.. = các frame, ô thừa trắng.
+  Graph: `LoadImage`(bảng) -> `VAEEncode` -> `SetLatentNoiseMask`(`LoadImageMask` kênh red: trắng
+  = ô frame) -> `KSampler` denoise 1.0. Vùng ngoài mặt nạ được giữ đúng ảnh gốc ở mỗi bước khử
+  nhiễu, nên self-attention của các ô frame luôn "nhìn" thấy nhân vật mẫu và chép theo (giống
+  reference-only, không cần model thêm). Xu hướng tự vẽ character sheet của checkpoint thành lợi
+  thế: `GRID_PROMPT` nói "the same character repeated", `GRID_NEGATIVE` bỏ các từ cấm nhiều nhân
+  vật. Action dài hơn `grid_max_cells - 1` frame -> chia đều nhiều bảng (`grid.chunks`), mỗi bảng
+  có ô mẫu riêng. Bảng lỗi (VD hết VRAM) -> tự vẽ từng frame (`layout` trong manifest = "single").
+  Chưa đo trên T4: 1536² SD1.5 + ControlNet + IP-Adapter ước tính 1.5–2.5 phút/bảng.
 - **Nhân vật** (mode prompt): vẽ bằng ControlNet theo khung xương đứng `NEUTRAL` -> đúng
   hướng nhìn ngang và cùng khung hình với các frame.
 - **IP-Adapter** (cubiq/ComfyUI_IPAdapter_plus, repo đã lưu trữ): thiếu node/model -> preflight
@@ -295,6 +310,8 @@ Chạy test local: `python -m unittest tests.test_forge -v` (không cần GPU).
 ## 11. Phase 2 (chưa làm)
 
 - Engine pose: thêm ControlNet depth/lineart, LoRA nhân vật, thêm preset theo 21 trạng thái game.
+- Checkpoint SDXL pixel art + ControlNet OpenPose SDXL (xinsir) + IP-Adapter SDXL: bám prompt và
+  giải phẫu tốt hơn SD1.5, nhưng model ~10GB và chậm hơn ~3-4 lần trên T4.
 - Nhiều hướng nhìn (Pixel Art Studio có `direction_gen`: south/east/west/north).
 - Train LoRA riêng cho từng nhân vật để khoá identity.
 - Auto-push output lên HuggingFace Dataset sau mỗi batch.

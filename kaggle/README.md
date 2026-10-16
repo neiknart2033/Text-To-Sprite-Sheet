@@ -9,10 +9,13 @@ Cách hoạt động (chi tiết: `KAGGLE_DESIGN.md`):
    khung xương đứng). Hoặc dùng sprite có sẵn của bạn. Sau đó tách nền, thu về pixel gốc,
    rút palette màu.
 2. **Chuyển động (engine `pose`, mặc định):** mỗi action có sẵn một chuỗi **khung xương tư
-   thế** (đi, chạy, chém, nhảy...). Mỗi frame được SD1.5 vẽ lại theo đúng khung xương đó
-   (ControlNet OpenPose), dùng ảnh nhân vật làm mẫu để giữ ngoại hình (IP-Adapter), cùng
-   một seed cho cả action. Vì khung xương cố định tỉ lệ và đường nền nên nhân vật không
-   bị zoom, trôi hay biến mất, và số frame luôn đúng.
+   thế** (đi, chạy, chém, nhảy...). SD1.5 vẽ nhân vật theo đúng các khung xương đó
+   (ControlNet OpenPose), dùng ảnh nhân vật làm mẫu để giữ ngoại hình (IP-Adapter). Vì
+   khung xương cố định tỉ lệ và đường nền nên nhân vật không bị zoom, trôi hay biến mất,
+   và số frame luôn đúng.
+   **Bảng tư thế** (mặc định): cả action được vẽ trong **một ảnh lưới**. Ô đầu là nhân vật
+   mẫu, giữ nguyên suốt quá trình vẽ; các ô sau là từng frame. SD nhìn thấy nhân vật mẫu
+   ngay cạnh nên vẽ mọi frame giống nhau hơn nhiều so với vẽ từng frame riêng lẻ.
 3. **Hậu xử lý:** tách nền, đưa về pixel gốc, ép đúng palette của nhân vật,
    đặt vào các ô vuông cùng kích thước, rồi xuất sheet, manifest và GIF.
 
@@ -144,8 +147,8 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 | `bg_color` | `"auto"` | Màu nền của canvas đưa vào WAN (nhân vật SD luôn vẽ nền trắng). `"auto"` chọn màu khác xa màu nhân vật nhất. Có thể đặt `green`/`magenta`/`blue` |
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
 | `engine` | `"pose"` | `"pose"` (khung xương + SD1.5) hoặc `"video"` (WAN 2.2). Có thể đặt riêng cho từng action |
-| `pose` | xem dưới | `strength` (1.0: độ bám khung xương), `ipadapter` (true), `ipadapter_weight` (0.8: độ giống nhân vật mẫu; cao quá thì tư thế kém đúng), `size` (512) |
-| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `poses.png` (khung xương) + `raw.png` (ảnh SD gốc) + `clean.png` (sau khi làm sạch); engine video có `input.png` + `clip.gif` |
+| `pose` | xem dưới | `strength` (1.0: độ bám khung xương), `ipadapter` (true), `ipadapter_weight` (0.8: độ giống nhân vật mẫu; cao quá thì tư thế kém đúng), `size` (512: cạnh một ô), `layout` (`"grid"`: bảng tư thế, cả action trong một ảnh; `"single"`: từng frame một ảnh, cách cũ), `grid_max_cells` (9: số ô tối đa một bảng kể cả ô mẫu; action dài hơn được chia thành nhiều bảng) |
+| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `board.png` (nguyên bảng tư thế SD vẽ) + `poses.png` (khung xương) + `raw.png` (từng frame SD gốc) + `clean.png` (sau khi làm sạch); engine video có `input.png` + `clip.gif` |
 | `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
@@ -228,7 +231,9 @@ output/
 | `SD vẽ thêm nhân vật/phông nền (đã tự xoá)` | Checkpoint hay vẽ nhiều nhân vật kiểu bảng thiết kế, đĩa tròn sau lưng, vệt đất. Tool tự xoá theo khung xương và thử seed khác để có nhân vật mẫu sạch. Xem `character_preview.png`; vẫn bẩn thì đổi `seed` của job |
 | Frame còn sót mảng màu sau lưng | Mở `debug/clean.png` (frame sau khi làm sạch) so với `debug/raw.png`. Thường do nhân vật mẫu còn bẩn: đổi `seed` của job |
 | Nhân vật sai tư thế / sai hướng (engine pose) | Mở `debug/poses.png` (khung xương) và `debug/raw.png` (ảnh SD gốc). Nhân vật không theo khung xương: tăng `pose.strength` (VD 1.2) hoặc giảm `pose.ipadapter_weight` (VD 0.6) |
-| Nhân vật khác nhau giữa các frame (engine pose) | Tăng `pose.ipadapter_weight` (VD 0.9–1.0), viết `prompt` của job mô tả rõ màu sắc và trang phục |
+| Nhân vật khác nhau giữa các frame (engine pose) | Kiểm tra `manifest.json` có `"layout": "grid"` (nếu là `"single"` thì bảng tư thế đã lỗi, xem log). Tăng `pose.ipadapter_weight` (VD 0.9–1.0), viết `prompt` của job mô tả rõ màu sắc và trang phục |
+| `Vẽ bảng tư thế lỗi (...) -> vẽ từng frame` | Bảng lỗi (thường do hết VRAM) nên tool tự vẽ từng frame, action vẫn xong. Muốn dùng bảng: đặt `"pose": {"grid_max_cells": 5}` (bảng nhỏ hơn) |
+| `ComfyUI thiếu node ... vẽ từng frame thay cho bảng tư thế` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |
 | `Thiếu: node ComfyUI 'Wan22ImageToVideoLatent'` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |
 | `Thiếu: model '...' trong checkpoints/` | Tên trong `jobs.json` sai: xem danh sách "ComfyUI đang thấy", hoặc dùng `"checkpoint": "auto"` |
 | `Frame ... gần như một màu (đen/trống)` | WAN chạy fp16 trên T4 có thể sinh NaN. Thử thêm `"--fp32-vae"` vào lệnh khởi động ComfyUI ở cell 3, hoặc đổi seed |
@@ -252,8 +257,8 @@ output/
 | Tải WAN từ HuggingFace (nếu không có trong dataset) | vài phút (~17GB) |
 | Khởi động ComfyUI | ~1–2 phút |
 | 1 nhân vật SD1.5 (512px, 30 steps) | ~10–30 giây |
-| **1 frame engine pose (512², 30 steps, ControlNet + IP-Adapter)** | **~6–10 giây** (ước tính, chưa đo) |
-| **1 action 8 frame, engine pose** | **~1–1.5 phút** mỗi GPU (ước tính) |
+| 1 action 8 frame, engine pose, `layout: "single"` (8 ảnh 512²) | ~1 phút 07 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
+| **1 action 8 frame, engine pose, bảng tư thế (1 ảnh 1536², 3x3 ô)** | **~1.5–2.5 phút** mỗi GPU (ước tính, chưa đo) |
 | 1 action WAN ở 448² (clip 2s = 49 frame, 20 steps) | ~1 phút 24 giây mỗi GPU (đo trên Kaggle T4, 10/2026) |
 | 1 action WAN ở 640² | ~3 phút mỗi GPU (ước tính) |
 

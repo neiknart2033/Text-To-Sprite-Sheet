@@ -19,6 +19,8 @@ POSE_NODES = SD15_NODES + ["LoadImage", "ControlNetLoader", "ControlNetApplyAdva
 # Custom node ComfyUI_IPAdapter_plus (cubiq). Thiếu thì engine pose vẫn chạy, chỉ yếu
 # khả năng giữ ngoại hình nhân vật giữa các frame.
 IPADAPTER_NODES = ["IPAdapterUnifiedLoader", "IPAdapter"]
+# Bảng tư thế (forge/grid.py): giữ nguyên ô nhân vật mẫu, chỉ vẽ các ô frame
+GRID_NODES = ["VAEEncode", "LoadImageMask", "SetLatentNoiseMask"]
 
 # Node đầu ra của từng graph (để lấy ảnh từ history)
 SD15_OUTPUT = "9"
@@ -58,10 +60,24 @@ def sd15_pose(checkpoint: str, prompt: str, negative: str, seed: int, pose_image
               controlnet: str, strength: float = 1.0, reference_image: str | None = None,
               ipadapter_weight: float = 0.8, ipadapter_preset: str = "PLUS (high strength)",
               size: int = 512, steps: int = 30, cfg: float = 7.0, sampler: str = "euler",
-              scheduler: str = "normal") -> dict:
-    """SD1.5 + ControlNet OpenPose (+ IP-Adapter giữ ngoại hình nếu có ảnh mẫu)."""
+              scheduler: str = "normal", init_image: str | None = None,
+              init_mask: str | None = None) -> dict:
+    """SD1.5 + ControlNet OpenPose (+ IP-Adapter giữ ngoại hình nếu có ảnh mẫu).
+
+    init_image + init_mask (bảng tư thế): bắt đầu từ ảnh có sẵn, chỉ vẽ lại vùng trắng
+    của mặt nạ; vùng đen (ô nhân vật mẫu, ô thừa) giữ nguyên ở mọi bước khử nhiễu.
+    Cỡ ảnh lúc đó lấy theo init_image, bỏ qua `size`.
+    """
     graph = sd15_txt2img(checkpoint, prompt, negative, seed, width=size, height=size,
                          steps=steps, cfg=cfg, sampler=sampler, scheduler=scheduler)
+    if init_image:
+        del graph["5"]
+        graph["40"] = {"class_type": "LoadImage", "inputs": {"image": init_image}}
+        graph["41"] = {"class_type": "VAEEncode", "inputs": {"pixels": ["40", 0], "vae": ["4", 2]}}
+        graph["42"] = {"class_type": "LoadImageMask", "inputs": {"image": init_mask, "channel": "red"}}
+        graph["43"] = {"class_type": "SetLatentNoiseMask",
+                       "inputs": {"samples": ["41", 0], "mask": ["42", 0]}}
+        graph["3"]["inputs"]["latent_image"] = ["43", 0]
     graph["20"] = {"class_type": "ControlNetLoader", "inputs": {"control_net_name": controlnet}}
     graph["21"] = {"class_type": "LoadImage", "inputs": {"image": pose_image}}
     graph["22"] = {"class_type": "ControlNetApplyAdvanced", "inputs": {

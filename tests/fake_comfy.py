@@ -5,7 +5,10 @@ Mô phỏng đúng các endpoint SpriteForge dùng: /system_stats, /object_info,
 - Graph SD1.5 -> ảnh nhân vật "pixel" khối 8px trên nền xanh hơi nhiễu.
 - Graph WAN   -> `length` frame: ảnh đầu vào bị dịch lên/xuống như đang nhảy,
                  màu bị nhiễu nhẹ (để kiểm tra bước ép palette).
-- Prompt chứa "FAIL_ME" -> history trả lỗi execution_error.
+- Graph bảng tư thế (SetLatentNoiseMask) -> giữ nguyên vùng đen của mặt nạ, vẽ nhân vật
+  vào từng ô trắng theo khung xương của ô đó.
+- Prompt chứa "FAIL_ME" -> history trả lỗi execution_error; "GRIDOOM" -> chỉ graph bảng
+  tư thế lỗi hết VRAM (để test đường lùi về vẽ từng frame).
 """
 from __future__ import annotations
 
@@ -104,6 +107,30 @@ def fake_pose_frame(pose: Image.Image, sprite: Image.Image, bg: str, cut: bool,
     return canvas
 
 
+def _cell_size(m: np.ndarray) -> int:
+    """Cạnh ô của bảng tư thế = ước chung của cỡ ảnh và mọi chỗ mặt nạ đổi giá trị
+    (ô 0 luôn giữ nguyên nên luôn có một chỗ đổi ở đúng cạnh ô đầu tiên)."""
+    d = m.astype(np.int8)
+    edges = [m.shape[0], m.shape[1]]
+    edges += list(np.flatnonzero(np.diff(d, axis=1).any(0)) + 1)
+    edges += list(np.flatnonzero(np.diff(d, axis=0).any(1)) + 1)
+    return int(np.gcd.reduce(np.array(edges)))
+
+
+def fake_board(pose: Image.Image, init: Image.Image, mask: Image.Image, sprite: Image.Image,
+               bg: str, cut: bool, seed: int, disk: bool = False, extra: bool = False) -> Image.Image:
+    m = np.asarray(mask.convert("RGB"))[:, :, 0] > 127
+    cell = _cell_size(m)
+    board = init.convert("RGB").copy()
+    for y in range(0, board.height, cell):
+        for x in range(0, board.width, cell):
+            if m[y + cell // 2, x + cell // 2]:
+                tile = fake_pose_frame(pose.crop((x, y, x + cell, y + cell)), sprite, bg, cut,
+                                       seed + x + y, disk=disk, extra=extra)
+                board.paste(tile, (x, y))
+    return board
+
+
 def _sprite_from(image: Image.Image) -> Image.Image:
     """Nhân vật (RGBA, cắt sát) từ ảnh nền trơn: dùng cho ảnh mẫu IP-Adapter."""
     a = np.asarray(image.convert("RGB")).astype(np.int16)
@@ -113,8 +140,9 @@ def _sprite_from(image: Image.Image) -> Image.Image:
 
 
 class FakeComfy:
-    def __init__(self, ipadapter: bool = True):
+    def __init__(self, ipadapter: bool = True, grid: bool = True):
         self.ipadapter = ipadapter
+        self.grid = grid
         self.uploads: dict[str, Image.Image] = {}
         self.files: dict[str, Image.Image] = {}
         self.history: dict[str, dict] = {}
@@ -140,7 +168,7 @@ class FakeComfy:
         classes = {n["class_type"] for n in graph.values()}
         texts = " ".join(n["inputs"].get("text", "") for n in graph.values()
                          if n["class_type"] == "CLIPTextEncode")
-        if "FAIL_ME" in texts:
+        if "FAIL_ME" in texts or ("GRIDOOM" in texts and "SetLatentNoiseMask" in classes):
             self.history[pid] = {"status": {"status_str": "error", "completed": False, "messages": [
                 ["execution_error", {"node_id": "8", "node_type": "KSampler",
                                      "exception_type": "RuntimeError",
@@ -159,9 +187,15 @@ class FakeComfy:
             if "ControlNetApplyAdvanced" in classes:
                 pose = self.uploads[graph["21"]["inputs"]["image"]]
                 ref = graph.get("31", {}).get("inputs", {}).get("image")
-                sprite = _sprite_from(self.uploads[ref] if ref else fake_character(seed, bg="white"))
-                images = [fake_pose_frame(pose, sprite, bg, "CUTFEET" in texts, seed,
-                                          disk="DISKBG" in texts, extra="EXTRAFIG" in texts)]
+                flags = {"disk": "DISKBG" in texts, "extra": "EXTRAFIG" in texts}
+                if "SetLatentNoiseMask" in classes:
+                    init = self.uploads[graph["40"]["inputs"]["image"]]
+                    sprite = _sprite_from(self.uploads[ref] if ref else init)
+                    images = [fake_board(pose, init, self.uploads[graph["42"]["inputs"]["image"]],
+                                         sprite, bg, "CUTFEET" in texts, seed, **flags)]
+                else:
+                    sprite = _sprite_from(self.uploads[ref] if ref else fake_character(seed, bg="white"))
+                    images = [fake_pose_frame(pose, sprite, bg, "CUTFEET" in texts, seed, **flags)]
             else:
                 images = [fake_character(seed, bg=bg, cut="CUTFEET" in texts)]
             out_node = workflows.SD15_OUTPUT
@@ -197,6 +231,8 @@ class FakeComfy:
                     nodes = set(workflows.WAN_NODES) | set(workflows.SD15_NODES) | set(workflows.POSE_NODES)
                     if fake.ipadapter:
                         nodes |= set(workflows.IPADAPTER_NODES)
+                    if fake.grid:
+                        nodes |= set(workflows.GRID_NODES)
                     return self._json({n: {} for n in nodes})
                 if url.path.startswith("/models/"):
                     return self._json(MODELS.get(url.path.split("/")[-1], []))
