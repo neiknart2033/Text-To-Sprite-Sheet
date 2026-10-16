@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-from . import matting, pixel, poses, sheet, workflows
+from . import cleanup, matting, pixel, poses, sheet, workflows
 from .comfy import ComfyClient, ComfyError
 from .config import VIEWS, Action, Settings
 
@@ -33,7 +33,11 @@ CHAR_BG = "white"
 CHAR_SIZE = (512, 768)  # ảnh dọc: đủ chỗ cho cả người, đỡ bị cắt chân
 CHAR_PROMPT = ("pixel art, game sprite, {description}, single character, full body from head "
                "to feet, ({view}:1.2), standing pose, centered, simple white background")
-CHAR_NEGATIVE = ("multiple characters, cropped, cut off feet, cut off head, out of frame, "
+# Chạy thật: checkpoint pixel art hay vẽ 3 nhân vật kiểu "character sheet", đĩa tròn sau
+# lưng, vệt đất dưới chân -> cấm thẳng trong negative (ComfyUI tự chia prompt > 77 token).
+CHAR_NEGATIVE = ("multiple characters, character sheet, multiple views, turnaround, reference sheet, "
+                 "cropped, cut off feet, cut off head, out of frame, circle, sun, halo, round backdrop, "
+                 "emblem, logo, banner, building, ground, floor, platform, "
                  "blurry, 3d render, realistic, photo, text, watermark, signature, border, frame, "
                  "scenery, detailed background, gradient background, shadow, {other_view}")
 OTHER_VIEW = {"side": "front view, facing the viewer", "front": "side view, profile"}
@@ -94,19 +98,31 @@ def generate_character(client: ComfyClient, cfg: Settings, description: str,
                                            scheduler=cfg.scheduler)
         raw = client.fetch(client.run(graph, workflows.SD15_OUTPUT, timeout_s=900)[0]).convert("RGB")
         bg_ok, measured = matting.matches_key(raw, CHAR_BG)
-        inside = not pixel.touches_edge(matting.cutout_flat(raw))
+        cut = matting.cutout_flat(raw)
+        clean_ok, cleaned = True, cut
+        if pose_name:
+            # Bỏ nhân vật thừa / đĩa tròn / vệt đất theo khung xương. Ảnh phải bỏ nhiều
+            # (>15%) thì vẫn dùng được nhưng ưu tiên thử seed khác cho sạch hẳn.
+            cleaned, stats = cleanup.clean_figure(cut, poses.NEUTRAL, measured)
+            removed = stats["removed_figures_px"] + stats["peeled_px"]
+            clean_ok = removed <= 0.15 * max(1, int((np.asarray(cut)[:, :, 3] > 0).sum()))
+        inside = not pixel.touches_edge(cleaned)
         tries.append({"seed": s, "background": measured, "background_ok": bg_ok,
-                      "inside_frame": inside})
-        if best is None or bg_ok + inside > best[0]:
-            best = (bg_ok + inside, raw, s)
-        if bg_ok and inside:
+                      "inside_frame": inside, "clean": clean_ok})
+        score = bg_ok + inside + clean_ok
+        if best is None or score > best[0]:
+            best = (score, raw, s, cleaned)
+        if bg_ok and inside and clean_ok:
             break
         problems = ([] if bg_ok else [f"nền {measured} không phải nền trắng đều"]) + \
-                   ([] if inside else ["nhân vật bị cắt ở mép ảnh"])
+                   ([] if inside else ["nhân vật bị cắt ở mép ảnh"]) + \
+                   ([] if clean_ok else ["SD vẽ thêm nhân vật/phông nền (đã tự xoá)"])
         log.warning("Nhân vật lần %d (seed %d): %s -> %s", attempt + 1, s, "; ".join(problems),
                     "thử seed khác" if attempt + 1 < CHAR_ATTEMPTS else "dùng ảnh tốt nhất")
-    _, raw, s = best
-    return raw, {"seed": s, "prompt": prompt, "negative": negative, "attempts": tries}
+    _, raw, s, cleaned = best
+    # "cutout": nhân vật đã tách nền + làm sạch, dùng thay cho raw khi chuẩn bị sprite
+    return raw, {"seed": s, "prompt": prompt, "negative": negative, "attempts": tries,
+                 "cutout": cleaned}
 
 
 def cutout(image: Image.Image) -> Image.Image:
@@ -280,7 +296,7 @@ def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,
     hip_x, ground_y = poses.ground_px(size)
     layout = pixel.VideoLayout(k=1, width=side, height=side,
                                center_x=hip_x * scale, ground_y=ground_y * scale)
-    frames, skeletons, raws = [], [], []
+    frames, skeletons, raws, cleans = [], [], [], []
     for key in keys:
         skeleton = poses.render(key, size)
         pose_name = client.upload_image(skeleton, f"spriteforge_pose_{uuid.uuid4().hex[:12]}.png")
@@ -291,14 +307,18 @@ def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,
             size=size, steps=cfg.steps, cfg=cfg.cfg_scale, sampler=cfg.sampler,
             scheduler=cfg.scheduler)
         raw = client.fetch(client.run(graph, workflows.POSE_OUTPUT, timeout_s=900)[0]).convert("RGB")
-        frames.append(pixel.frame_to_native(matting.cutout_flat(raw), (side, side), palette))
+        bg = matting.border_color(np.asarray(raw).astype(np.int16))
+        cleaned, _ = cleanup.clean_figure(matting.cutout_flat(raw), key, bg)
+        frames.append(pixel.frame_to_native(cleaned, (side, side), palette))
         skeletons.append(skeleton)
         raws.append(raw)
-    if debug_dir:  # khung xương + ảnh SD gốc từng frame, để soi lỗi
+        cleans.append(cleaned)
+    if debug_dir:  # khung xương + ảnh SD gốc + sau làm sạch, từng frame, để soi lỗi
         debug_dir = Path(debug_dir)
         debug_dir.mkdir(parents=True, exist_ok=True)
         _strip(skeletons, debug_dir / "poses.png")
         _strip(raws, debug_dir / "raw.png")
+        _strip([_on_gray(c) for c in cleans], debug_dir / "clean.png")
     empty = sum(pixel.bbox(f) is None for f in frames)
     if empty == len(frames):
         raise ComfyError("Mọi frame đều trống sau khi tách nền: SD không vẽ nhân vật trên nền "
@@ -307,6 +327,12 @@ def animate_pose(client: ComfyClient, cfg: Settings, native: Image.Image,
         log.warning("%d/%d frame trống sau khi tách nền", empty, len(frames))
     return frames, layout, {"engine": "pose", "pose": action.pose, "seed": seed, "prompt": prompt,
                             "ipadapter": bool(ref_name), "scale": round(scale, 4)}
+
+
+def _on_gray(rgba: Image.Image) -> Image.Image:
+    bg = Image.new("RGBA", rgba.size, (90, 90, 100, 255))
+    bg.alpha_composite(rgba.convert("RGBA"))
+    return bg.convert("RGB")
 
 
 def _strip(images: list[Image.Image], path: Path, height: int = 256) -> None:

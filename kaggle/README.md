@@ -145,7 +145,7 @@ Cell 4 sẽ chạy thử 1 action và in thời gian, để bạn biết batch t
 | `preview_scale` | `3` | Hệ số phóng của GIF xem trước |
 | `engine` | `"pose"` | `"pose"` (khung xương + SD1.5) hoặc `"video"` (WAN 2.2). Có thể đặt riêng cho từng action |
 | `pose` | xem dưới | `strength` (1.0: độ bám khung xương), `ipadapter` (true), `ipadapter_weight` (0.8: độ giống nhân vật mẫu; cao quá thì tư thế kém đúng), `size` (512) |
-| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `poses.png` (khung xương) + `raw.png` (ảnh SD gốc); engine video có `input.png` + `clip.gif` |
+| `debug` | `true` | Lưu ảnh soi lỗi cho mỗi action trong `debug/`: engine pose có `poses.png` (khung xương) + `raw.png` (ảnh SD gốc) + `clean.png` (sau khi làm sạch); engine video có `input.png` + `clip.gif` |
 | `wan` | xem dưới | `steps` (20), `cfg` (5), `duration` (2.0 giây), `width`/`height` (640), `useful_fraction` (0.85), `char_fill` (0.6), `timeout_s` (3600) |
 
 **Mỗi job:** `name` (chỉ dùng chữ, số, `_`, `-`); `mode` là `"prompt"` (cần
@@ -225,6 +225,8 @@ output/
 |---|---|
 | `Tắt IP-Adapter (...)` | Thiếu custom node hoặc model IP-Adapter: engine pose vẫn chạy nhưng nhân vật kém giống nhau giữa các frame. Xem cell 2 có tải đủ `ip-adapter-plus_sd15` và `CLIP-ViT-H-14...` không |
 | `chưa có tư thế mẫu "..."` | Tên action không trùng tư thế có sẵn: thêm `"pose": "<tên có sẵn>"` vào action đó |
+| `SD vẽ thêm nhân vật/phông nền (đã tự xoá)` | Checkpoint hay vẽ nhiều nhân vật kiểu bảng thiết kế, đĩa tròn sau lưng, vệt đất. Tool tự xoá theo khung xương và thử seed khác để có nhân vật mẫu sạch. Xem `character_preview.png`; vẫn bẩn thì đổi `seed` của job |
+| Frame còn sót mảng màu sau lưng | Mở `debug/clean.png` (frame sau khi làm sạch) so với `debug/raw.png`. Thường do nhân vật mẫu còn bẩn: đổi `seed` của job |
 | Nhân vật sai tư thế / sai hướng (engine pose) | Mở `debug/poses.png` (khung xương) và `debug/raw.png` (ảnh SD gốc). Nhân vật không theo khung xương: tăng `pose.strength` (VD 1.2) hoặc giảm `pose.ipadapter_weight` (VD 0.6) |
 | Nhân vật khác nhau giữa các frame (engine pose) | Tăng `pose.ipadapter_weight` (VD 0.9–1.0), viết `prompt` của job mô tả rõ màu sắc và trang phục |
 | `Thiếu: node ComfyUI 'Wan22ImageToVideoLatent'` | ComfyUI quá cũ: để `COMFY_REF = ""` để dùng bản mới nhất |

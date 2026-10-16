@@ -12,13 +12,13 @@ import unittest
 from pathlib import Path
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "kaggle"))
 
-from forge import comfy, config, matting, pipelines, pixel, poses, sheet, workflows  # noqa: E402
+from forge import cleanup, comfy, config, matting, pipelines, pixel, poses, sheet, workflows  # noqa: E402
 from tests.fake_comfy import FakeComfy, fake_character  # noqa: E402
 
 import run_batch  # noqa: E402
@@ -497,6 +497,65 @@ class PoseEngineTests(unittest.TestCase):
                 _close_log_handlers()
         finally:
             fake_comfy.MODELS["controlnet"] = saved
+
+    def test_clean_figure_keeps_hero_and_sword_only(self):
+        size, key = 512, poses.NEUTRAL
+        unit = poses.standing_height_px(size)
+        hip_x, ground_y = poses.ground_px(size)
+        img = Image.new("RGB", (size, size), (250, 250, 250))
+        draw = ImageDraw.Draw(img)
+        cx, cy, r = hip_x, ground_y - 0.6 * unit, 0.55 * unit
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=(230, 70, 20))       # đĩa tròn
+        a = np.asarray(img).copy()
+        body = poses.body_mask(key, size, 0.08)
+        a[np.roll(body, int(0.6 * unit), axis=1)] = (40, 110, 40)              # nhân vật thừa
+        a[body] = (40, 40, 110)                                                  # nhân vật chính
+        img = Image.fromarray(a)
+        draw = ImageDraw.Draw(img)
+        wx, wy = poses.to_pixels(poses.skeleton(key), size)[4]
+        draw.line([(wx, wy), (wx + 0.45 * unit, wy - 0.2 * unit)], fill=(200, 200, 215), width=5)  # kiếm
+        draw.line([(40, ground_y + 6), (470, ground_y + 6)], fill=(30, 20, 20), width=5)        # vệt đất
+        clean, stats = cleanup.clean_figure(matting.cutout_flat(img), key, (250, 250, 250))
+        alpha = np.asarray(clean)[:, :, 3]
+        neck = poses.to_pixels(poses.skeleton(key), size)[1]
+        self.assertEqual(alpha[int(neck[1]), int(neck[0])], 255)                  # giữ nhân vật
+        self.assertEqual(alpha[int(cy), int(cx - 0.9 * r)], 0)                    # bỏ đĩa tròn
+        self.assertEqual(alpha[int(neck[1]), int(neck[0] + 0.6 * unit)], 0)      # bỏ người thừa
+        tip = (int(wx + 0.42 * unit), int(wy - 0.187 * unit))
+        self.assertEqual(alpha[tip[1] - 2:tip[1] + 3, tip[0] - 2:tip[0] + 3].max(), 255)  # giữ kiếm
+        self.assertEqual(alpha[int(ground_y + 6), 50], 0)                         # bỏ vệt đất
+        self.assertGreater(stats["peeled_px"], 0)
+
+    def test_dirty_sd_output_gives_clean_single_character(self):
+        with FakeComfy() as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:
+            d = Path(d)
+            jobs = {"comfy_url": fake.url, "checkpoint": "pixel_test.safetensors", "seed": 3,
+                    "jobs": [{"name": "r", "prompt": "DISKBG EXTRAFIG samurai",
+                              "actions": [{"name": "attack", "prompt": "slash", "frames": 4}]}]}
+            (d / "jobs.json").write_text(json.dumps(jobs), encoding="utf-8")
+            self.assertEqual(run_batch.main(["--jobs", str(d / "jobs.json"), "--out", str(d / "o")]), 0)
+            info = json.loads((d / "o/r/character.json").read_text(encoding="utf-8"))
+            self.assertEqual(len(info["attempts"]), pipelines.CHAR_ATTEMPTS)  # ảnh bẩn -> thử lại
+            self.assertFalse(info["attempts"][0]["clean"])
+
+            def disk_share(im):
+                a = np.asarray(im.convert("RGBA")).astype(int)
+                m = a[:, :, 3] > 0
+                red = m & (a[:, :, 0] > 180) & (a[:, :, 1] < 110) & (a[:, :, 2] < 80)
+                return red.sum() / max(1, m.sum())
+
+            char = Image.open(d / "o/r/character.png")
+            self.assertLess(disk_share(char), 0.08)  # còn sót mảnh kẹp giữa tay và thân (mắt đỏ ~0.5%)
+            self.assertLess(char.width, char.height * 0.9)  # một nhân vật, không phải hai
+            # Frame: lọc theo khung xương là lớp an toàn (ảnh giả còn vẽ đĩa ở MỌI frame dù
+            # ảnh mẫu đã sạch). Nhân vật thừa phải biến mất ở mọi frame; đĩa ở đa số frame.
+            sheet_img = Image.open(d / "o/r/attack/spritesheet.png")
+            cells = [sheet_img.crop((i * 128, 0, i * 128 + 128, 128)) for i in range(4)]
+            self.assertGreaterEqual(sum(disk_share(c) < 0.10 for c in cells), 3)
+            for cell in cells:
+                box = cell.getbbox()
+                self.assertLess(box[3] - box[1], 128)
+            _close_log_handlers()
 
     def test_pose_engine_without_ipadapter_still_runs(self):
         with FakeComfy(ipadapter=False) as fake, tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as d:

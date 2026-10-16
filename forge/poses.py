@@ -204,6 +204,29 @@ def ground_px(size: int) -> tuple[float, float]:
     return CENTER * size, GROUND * size
 
 
+def body_mask(key: dict, size: int, radius: float, head: float | None = None) -> np.ndarray:
+    """Vùng thân người quanh khung xương (bool HxW): mỗi đoạn xương thành ống bán kính
+    `radius` (đơn vị chiều cao), đầu thành hình tròn bán kính `head`. Dùng để biết pixel nào
+    thuộc nhân vật khi SD vẽ thêm thứ khác (người thứ hai, đĩa tròn phía sau, vệt đất)."""
+    unit = UNIT * size
+    pts = to_pixels(skeleton(key), size)
+    layer = Image.new("L", (size, size), 0)
+    draw = ImageDraw.Draw(layer)
+    width = max(1, round(2 * radius * unit))
+    for a, b in LIMBS[:12]:  # thân, tay, chân (bỏ các đoạn mặt)
+        if pts[a] is not None and pts[b] is not None:
+            draw.line([pts[a], pts[b]], fill=255, width=width)
+    for p in pts[:14]:
+        if p is not None:
+            r = radius * unit
+            draw.ellipse([p[0] - r, p[1] - r, p[0] + r, p[1] + r], fill=255)
+    if pts[0] is not None and pts[1] is not None:
+        r = (head or radius * 1.5) * unit
+        cx, cy = (pts[0][0] + pts[1][0]) / 2, (pts[0][1] + pts[1][1]) / 2 - 0.04 * unit
+        draw.ellipse([cx - r, cy - r, cx + r, cy + r], fill=255)
+    return np.asarray(layer) > 0
+
+
 def render(key: dict, size: int = 512) -> Image.Image:
     """Ảnh OpenPose (nền đen) đúng kiểu ControlNet được huấn luyện."""
     pts = to_pixels(skeleton(key), size)

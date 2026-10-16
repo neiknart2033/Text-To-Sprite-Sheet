@@ -171,7 +171,8 @@ def main(argv: list[str] | None = None) -> int:
 # v3: nhân vật nền trắng 512x768 + loại ảnh bị cắt mép; WAN 640px, key màu phông thật,
 #     chọn frame lành trong ±2 frame.
 # v4: engine "pose" (khung xương + SD1.5 + ControlNet OpenPose + IP-Adapter) mặc định.
-PIPELINE_VERSION = 4
+# v5: làm sạch theo khung xương (bỏ nhân vật thừa, đĩa tròn, vệt đất) cho nhân vật mẫu và frame.
+PIPELINE_VERSION = 5
 
 
 def _digest(*parts) -> str:
@@ -324,6 +325,7 @@ def ensure_character(client: ComfyClient, cfg: config.Settings, job: config.Job,
         log.info("[%s] tạo nhân vật từ prompt...", job.name)
         raw, gen = pipelines.generate_character(client, cfg, job.prompt, job.seed)
         raw.save(job_dir / "character_raw.png")
+        raw = gen.pop("cutout", raw)  # nhân vật đã tách nền + làm sạch (engine pose)
         info.update(gen)
     else:
         src = _resolve_path(job.character_image, jobs_dir)

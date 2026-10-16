@@ -278,6 +278,12 @@ Chạy test local: `python -m unittest tests.test_forge -v` (không cần GPU).
   `KSampler` (cùng seed cho cả action) -> nền trắng. Hậu xử lý: `cutout_flat` -> thu về pixel
   gốc theo tỉ lệ `chiều cao sprite / chiều cao đứng của khung xương` (chung cho mọi action)
   -> ép palette nhân vật -> `place_in_cells` (layout cố định, không trôi).
+- **Làm sạch theo khung xương** (`forge/cleanup.py`, v5): chạy thật thấy checkpoint vẽ 3 nhân
+  vật kiểu character sheet, đĩa tròn sau lưng, vệt đất; IP-Adapter chép chúng sang mọi frame.
+  Lọc: giữ mảng chạm lõi khung xương; bóc mảng một màu lớn sát nền nằm >= 60% ngoài thân
+  (đã thử nới cho mảng rất lớn: bóc mất áo choàng thật -> bỏ); xoá viền/nền trắng lộ ra; bỏ
+  phần "dày" ngoài vùng thân rộng (giữ kiếm mảnh); dưới đường nền chỉ giữ bàn chân. Nhân vật
+  mẫu bẩn (> 15% bị xoá) -> thử seed khác.
 - **Nhân vật** (mode prompt): vẽ bằng ControlNet theo khung xương đứng `NEUTRAL` -> đúng
   hướng nhìn ngang và cùng khung hình với các frame.
 - **IP-Adapter** (cubiq/ComfyUI_IPAdapter_plus, repo đã lưu trữ): thiếu node/model -> preflight

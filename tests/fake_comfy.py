@@ -18,7 +18,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from forge import workflows
 
@@ -78,7 +78,7 @@ def fake_video(start: Image.Image, length: int, seed: int) -> list[Image.Image]:
 
 
 def fake_pose_frame(pose: Image.Image, sprite: Image.Image, bg: str, cut: bool,
-                    seed: int) -> Image.Image:
+                    seed: int, disk: bool = False, extra: bool = False) -> Image.Image:
     """Mô phỏng SD + ControlNet: vẽ nhân vật đúng chỗ và đúng chiều cao của khung xương."""
     rng = np.random.default_rng(seed)
     size = pose.size
@@ -93,7 +93,14 @@ def fake_pose_frame(pose: Image.Image, sprite: Image.Image, bg: str, cut: bool,
     w = max(1, round(sprite.width * h / sprite.height))
     body = sprite.resize((w, h), Image.NEAREST)
     top = y1 - h + (150 if cut else 0)
-    canvas.paste(body, (round((x0 + x1) / 2 - w / 2), top), body)
+    cx = (x0 + x1) / 2
+    if disk:  # lỗi thật: đĩa tròn to phía sau nhân vật (to cỡ ảnh thật so với dáng người)
+        r = h * 0.65
+        ImageDraw.Draw(canvas).ellipse([cx - r, top + h * 0.45 - r, cx + r, top + h * 0.45 + r],
+                                        fill=(230, 60, 20))
+    canvas.paste(body, (round(cx - w / 2), top), body)
+    if extra:  # lỗi thật: thêm nhân vật thứ hai cạnh bên (kiểu character sheet)
+        canvas.paste(body, (round(cx - w / 2 + w * 1.7), top), body)
     return canvas
 
 
@@ -153,7 +160,8 @@ class FakeComfy:
                 pose = self.uploads[graph["21"]["inputs"]["image"]]
                 ref = graph.get("31", {}).get("inputs", {}).get("image")
                 sprite = _sprite_from(self.uploads[ref] if ref else fake_character(seed, bg="white"))
-                images = [fake_pose_frame(pose, sprite, bg, "CUTFEET" in texts, seed)]
+                images = [fake_pose_frame(pose, sprite, bg, "CUTFEET" in texts, seed,
+                                          disk="DISKBG" in texts, extra="EXTRAFIG" in texts)]
             else:
                 images = [fake_character(seed, bg=bg, cut="CUTFEET" in texts)]
             out_node = workflows.SD15_OUTPUT
